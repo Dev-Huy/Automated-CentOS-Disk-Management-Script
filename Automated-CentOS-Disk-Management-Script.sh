@@ -13,7 +13,7 @@ DISK=""
 TEST_USER="client_user"
 
 # ==========================================================
-# 1. NHÓM HÀM PARTITION (Tạo đĩa, Format & Tự động Mount)
+# 1. NHÓM HÀM PARTITION (Tạo đĩa dùng ngay, Format & Mount)
 # ==========================================================
 chon_o_dia() {
     echo
@@ -35,19 +35,32 @@ chon_o_dia() {
     echo "Da chon: $DISK"
 }
 
-tao_primary() {
-    local FS_TYPE
-    echo "--> Tao primary partition 10GB tren $DISK"
-    printf "o\nn\np\n1\n\n+10G\nw\n" | fdisk "$DISK"
-    partprobe "$DISK"
-    sleep 1
+chay_chuc_nang_partition() {
+    echo "=== TẠO PHÂN VÙNG LƯU TRỮ TIÊU CHUẨN ==="
+    chon_o_dia || return 1
+    local MOUNT_DIR="/root/Desktop/DiskLocal"
+    
+    echo "CẢNH BÁO: Mọi dữ liệu trên $DISK sẽ bị XÓA."
+    read -r -p "Tiếp tục? (y/N): " ok
+    [ "$ok" != "y" ] && [ "$ok" != "Y" ] && { echo "Đã hủy."; return 0; }
 
-    echo "Chọn hệ tập tin (filesystem) để format:"
+    # 1. Thiết lập dung lượng
+    echo "--> CẤU HÌNH DUNG LƯỢNG:"
+    read -r -p "Nhập dung lượng (vd: +10G, +500M) hoặc nhấn Enter để dùng toàn bộ ổ đĩa: " PART_SIZE
+
+    # 2. Chọn định dạng
+    echo "--> CHỌN LOẠI ĐỊNH DẠNG:"
     echo "  1. ext4 (Khuyến nghị)"
     echo "  2. xfs"
     echo "  3. ext3"
-    read -r -p "Chọn định dạng [1]: " fs_choice
+    read -r -p "Chọn [1-3]: " fs_choice
 
+    echo "--> Đang tạo phân vùng Primary dung lượng ${PART_SIZE:-TOÀN BỘ} trên $DISK"
+    printf "o\nn\np\n1\n\n%s\nw\n" "$PART_SIZE" | fdisk "$DISK"
+    partprobe "$DISK"
+    sleep 1
+
+    local FS_TYPE
     case "$fs_choice" in
         2) FS_TYPE="xfs" ;;
         3) FS_TYPE="ext3" ;;
@@ -56,111 +69,104 @@ tao_primary() {
 
     echo "--> Format $FS_TYPE cho ${DISK}1"
     mkfs -t "$FS_TYPE" "${DISK}1"
-}
 
-tao_o_con_lai_cho_lvm() {
-    echo "--> Tao extended + logical type 8e tren toan bo o $DISK"
-    printf "o\nn\ne\n1\n\n\nn\nl\n\n\nt\n5\n8e\nw\n" | fdisk "$DISK"
-    partprobe "$DISK"
-    sleep 1
-}
-
-chay_chuc_nang_partition() {
-    chon_o_dia || return 1
-    local MOUNT_DIR="/root/Desktop/DiskLocal"
-    
-    echo "--- Chọn mục đích sử dụng ổ đĩa $DISK ---"
-    echo " A. Lưu trữ tiêu chuẩn: Tạo Primary 10GB, format & TỰ ĐỘNG MOUNT"
-    echo " B. Chuẩn bị cho LVM: Tạo phân vùng type 8e"
-    read -r -p "Chọn (A/B): " choice
-
-    echo "CẢNH BÁO: Mọi dữ liệu trên $DISK sẽ bị XÓA."
-    read -r -p "Tiếp tục? (y/N): " ok
-    [ "$ok" != "y" ] && [ "$ok" != "Y" ] && { echo "Đã hủy."; return 0; }
-
-    if [[ "$choice" == "A" || "$choice" == "a" ]]; then
-        tao_primary
-        mkdir -p "$MOUNT_DIR"
-        mount "${DISK}1" "$MOUNT_DIR"
-        echo "[OK] Đã gắn kết ${DISK}1 vào $MOUNT_DIR."
-        echo "=> Ổ đĩa đã sẵn sàng để sử dụng hoặc chia sẻ qua Chức năng 3."
-    elif [[ "$choice" == "B" || "$choice" == "b" ]]; then
-        tao_o_con_lai_cho_lvm
-        echo "[OK] Phân vùng ${DISK}5 (type 8e) đã sẵn sàng làm nguyên liệu LVM."
-    else
-        echo "Lựa chọn không hợp lệ."
-    fi
+    mkdir -p "$MOUNT_DIR"
+    mount "${DISK}1" "$MOUNT_DIR"
+    echo "[OK] Đã gắn kết ${DISK}1 vào $MOUNT_DIR."
+    echo "=> Ổ đĩa đã sẵn sàng để sử dụng hoặc chia sẻ qua Chức năng 3."
 }
 
 # ==========================================================
-# 2. HÀM LVM (Tạo ổ ảo, Format & Tự động Mount)
+# 2. HÀM LVM (Chuẩn bị nguyên liệu, Tạo ổ ảo, Format & Mount)
 # ==========================================================
 setup_lvm() {
-    local -a DEVICES
-    local DEV VG_NAME LV_NAME CONFIRM FS_TYPE
-    local MOUNT_DIR="/root/Desktop/DiskLVM"
-    
-    echo "=== CẤU HÌNH Ổ ĐĨA ẢO LVM ==="
-    
-    # NÂNG CẤP: Quét và lọc ra các thiết bị khả dụng (Chưa bị mount)
-    echo "--> Danh sách các thiết bị/phân vùng KHẢ DỤNG cho LVM (Chưa được mount):"
-    echo -e "THIẾT BỊ\tLOẠI\t\tKÍCH THƯỚC"
-    
-    # Lọc lsblk: Chỉ lấy disk hoặc part, và KHÔNG có Mountpoint
-    lsblk -l -o NAME,TYPE,SIZE,MOUNTPOINT | awk '$4 == "" && ($2 == "disk" || $2 == "part") {printf "/dev/%-15s %-15s %s\n", $1, $2, $3}'
-    echo "--------------------------------------------------------"
-    
-    read -r -p "Nhập thiết bị từ bảng trên (cách nhau bằng khoảng trắng, vd: /dev/sdb5 /dev/sdc): " -a DEVICES
-    
-    # Bẫy lỗi nếu không nhập gì
-    [ "${#DEVICES[@]}" -eq 0 ] && { echo "=> LỖI: Chưa nhập thiết bị nào."; return 1; }
-    
-    # Kiểm tra xem thiết bị có tồn tại và đang bị mount không
-    for DEV in "${DEVICES[@]}"; do
-        if [ ! -b "$DEV" ]; then
-            echo "=> LỖI: Thiết bị $DEV không tồn tại."
-            return 1
-        fi
-        if lsblk -nr -o MOUNTPOINT "$DEV" | grep -q '[^[:space:]]'; then
-            echo "=> LỖI: Thiết bị $DEV đang được mount! LVM không thể sử dụng thiết bị này."
-            return 1
-        fi
-    done
+    echo "=== QUẢN LÝ Ổ ĐĨA ẢO LVM ==="
+    echo " 1. Bước 1: Chuẩn bị đĩa thô (Tạo phân vùng LVM - type 8e)"
+    echo " 2. Bước 2: Khởi tạo LVM (Tạo VG, LV, Format & Tự động Mount)"
+    read -r -p "Chọn thao tác [1-2]: " lvm_step
 
-    # ... (Phần code cấu hình VG, LV, Format và Mount tiếp theo giữ nguyên như bản trước) ...
-    read -r -p "Tên Volume Group [VolumeA]: " VG_NAME
-    VG_NAME="${VG_NAME:-VolumeA}"
-    read -r -p "Tên Logical Volume [LV]: " LV_NAME
-    LV_NAME="${LV_NAME:-LV}"
+    if [ "$lvm_step" == "1" ]; then
+        chon_o_dia || return 1
+        echo "--> CẤU HÌNH DUNG LƯỢNG CHO PHÂN VÙNG LVM:"
+        read -r -p "Nhập dung lượng (vd: +10G, +500M) hoặc nhấn Enter để dùng toàn bộ: " PART_SIZE
+        
+        echo "CẢNH BÁO: Mọi dữ liệu trên $DISK sẽ bị XÓA."
+        read -r -p "Tiếp tục? (y/N): " ok
+        [ "$ok" != "y" ] && [ "$ok" != "Y" ] && { echo "Đã hủy."; return 0; }
 
-    read -r -p "Tạo LVM ($VG_NAME/$LV_NAME)? (y/N): " CONFIRM
-    [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && return 0
+        echo "--> Đang tạo phân vùng Extended và Logical (type 8e) dung lượng ${PART_SIZE:-TOÀN BỘ} trên $DISK"
+        printf "o\nn\ne\n1\n\n%s\nn\nl\n\n\nt\n5\n8e\nw\n" "$PART_SIZE" | fdisk "$DISK"
+        partprobe "$DISK"
+        sleep 1
+        echo "[OK] Phân vùng ${DISK}5 (type 8e) đã được tạo thành công."
+        echo "=> Hãy tiếp tục chọn lại Chức năng 2 (Bước 2) để gộp phân vùng này vào hệ thống LVM."
+        return 0
+        
+    elif [ "$lvm_step" == "2" ]; then
+        local -a DEVICES
+        local DEV VG_NAME LV_NAME CONFIRM FS_TYPE
+        local MOUNT_DIR="/root/Desktop/DiskLVM"
+        
+        echo "=== KHỞI TẠO VÀ GẮN KẾT LVM ==="
+        echo "--> Danh sách các thiết bị/phân vùng KHẢ DỤNG (Gồm cả các phân vùng 8e vừa tạo):"
+        echo -e "THIẾT BỊ\tLOẠI\t\tKÍCH THƯỚC"
+        
+        # Quét lấy ổ đĩa hoặc phân vùng thô chưa bị mount
+        lsblk -l -o NAME,TYPE,SIZE,MOUNTPOINT | awk '$4 == "" && ($2 == "disk" || $2 == "part") {printf "/dev/%-15s %-15s %s\n", $1, $2, $3}'
+        echo "--------------------------------------------------------"
+        
+        read -r -p "Nhập thiết bị từ bảng trên (cách nhau bằng khoảng trắng, vd: /dev/sdb5 /dev/sdc): " -a DEVICES
+        
+        [ "${#DEVICES[@]}" -eq 0 ] && { echo "=> LỖI: Chưa nhập thiết bị nào."; return 1; }
+        
+        for DEV in "${DEVICES[@]}"; do
+            if [ ! -b "$DEV" ]; then
+                echo "=> LỖI: Thiết bị $DEV không tồn tại."
+                return 1
+            fi
+            if lsblk -nr -o MOUNTPOINT "$DEV" | grep -q '[^[:space:]]'; then
+                echo "=> LỖI: Thiết bị $DEV đang được mount! Không thể dùng."
+                return 1
+            fi
+        done
 
-    echo "--> Đang khởi tạo LVM..."
-    pvcreate "${DEVICES[@]}" || return 1
-    vgcreate "$VG_NAME" "${DEVICES[@]}" || return 1
-    lvcreate -l 100%FREE -n "$LV_NAME" "$VG_NAME" || return 1
+        read -r -p "Tên Volume Group [VolumeA]: " VG_NAME
+        VG_NAME="${VG_NAME:-VolumeA}"
+        read -r -p "Tên Logical Volume [LV]: " LV_NAME
+        LV_NAME="${LV_NAME:-LV}"
 
-    local LV_TARGET="/dev/$VG_NAME/$LV_NAME"
-    
-    echo "Chọn hệ tập tin để format:"
-    echo "  1. ext4 (Khuyến nghị) | 2. xfs | 3. ext3"
-    read -r -p "Chọn định dạng [1]: " fs_choice_lvm
-    
-    case "$fs_choice_lvm" in
-        2) FS_TYPE="xfs" ;;
-        3) FS_TYPE="ext3" ;;
-        *) FS_TYPE="ext4" ;;
-    esac
+        read -r -p "Tạo LVM ($VG_NAME/$LV_NAME) bằng các thiết bị trên? (y/N): " CONFIRM
+        [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && return 0
 
-    echo "--> Định dạng $FS_TYPE cho LVM..."
-    mkfs -t "$FS_TYPE" "$LV_TARGET" || return 1
-    
-    mkdir -p "$MOUNT_DIR"
-    mount "$LV_TARGET" "$MOUNT_DIR" || return 1
-    
-    echo "[OK] Ổ ảo LVM $LV_TARGET đã được mount tại $MOUNT_DIR."
-    echo "=> Sẵn sàng sử dụng hoặc dùng Chức năng 3 để cấu hình Samba."
+        echo "--> Đang khởi tạo LVM..."
+        pvcreate "${DEVICES[@]}" || return 1
+        vgcreate "$VG_NAME" "${DEVICES[@]}" || return 1
+        lvcreate -l 100%FREE -n "$LV_NAME" "$VG_NAME" || return 1
+
+        local LV_TARGET="/dev/$VG_NAME/$LV_NAME"
+        
+        echo "Chọn hệ tập tin để format LVM:"
+        echo "  1. ext4 (Khuyến nghị) | 2. xfs | 3. ext3"
+        read -r -p "Chọn định dạng [1]: " fs_choice_lvm
+        
+        case "$fs_choice_lvm" in
+            2) FS_TYPE="xfs" ;;
+            3) FS_TYPE="ext3" ;;
+            *) FS_TYPE="ext4" ;;
+        esac
+
+        echo "--> Định dạng $FS_TYPE cho $LV_TARGET..."
+        mkfs -t "$FS_TYPE" "$LV_TARGET" || return 1
+        
+        mkdir -p "$MOUNT_DIR"
+        mount "$LV_TARGET" "$MOUNT_DIR" || return 1
+        
+        echo "[OK] Ổ ảo LVM $LV_TARGET đã được mount tại $MOUNT_DIR."
+        echo "=> Sẵn sàng sử dụng hoặc dùng Chức năng 3 để cấu hình File Server."
+    else
+        echo "Lựa chọn không hợp lệ."
+        return 1
+    fi
 }
 
 # ==========================================================
