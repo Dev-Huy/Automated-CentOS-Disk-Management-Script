@@ -124,6 +124,24 @@ chay_chuc_nang_partition() {
 # ==========================================================
 # MODULE 3: LVM (Logical Volume Manager - New & Extend)
 # ==========================================================
+get_lvm_free_mb() {
+    local dev=$1
+    command -v parted >/dev/null 2>&1 || return 1
+    [ -b "$dev" ] || return 1
+
+    # Chỉ tính UNALLOCATED/Free Space thật sự, không tính dung lượng trống
+    # bên trong filesystem/partition hiện hữu.
+    parted -m -s "$dev" unit MiB print free 2>/dev/null |
+        awk -F: '$5 ~ /Free Space/ {
+            gsub(/MiB/, "", $4);
+            sum += $4
+        } END {printf "%.0f\n", sum+0}'
+}
+
+format_gb() {
+    awk -v mb="${1:-0}" 'BEGIN {printf "%.2f GB", mb/1024}'
+}
+
 prepare_lvm_disk() {
     local dev=$1
     local free_start free_end free_size
@@ -220,9 +238,27 @@ setup_lvm() {
     if [ "$mode" == "1" ]; then
         msg_info "KHỞI TẠO LVM MỚI"
         local disks_avail=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk" && $1!="sr0" && !/loop/ {print $1}')
+        local has_lvm_disk=0
         for d in $disks_avail; do
-            ! is_os_disk "/dev/$d" && echo "  - $d ($(lsblk -dn -o SIZE "/dev/$d"))"
+            local dev="/dev/$d"
+            is_os_disk "$dev" && continue
+
+            local total_size free_mb
+            total_size=$(lsblk -dn -o SIZE "$dev")
+            free_mb=$(get_lvm_free_mb "$dev")
+            free_mb=${free_mb:-0}
+
+            # Chỉ đưa vào danh sách nếu thực sự có vùng UNALLOCATED.
+            if [ "$free_mb" -ge 10 ]; then
+                has_lvm_disk=1
+                echo "  - $d | Tổng: $total_size | Trống khả dụng cho LVM: $(format_gb "$free_mb") (${free_mb} MiB)"
+            fi
         done
+
+        [ "$has_lvm_disk" -eq 0 ] && {
+            msg_warn "Không có ổ đĩa nào còn vùng UNALLOCATED khả dụng cho LVM."
+            return 1
+        }
         
         read -r -p "Nhập tên các ổ gốc để gộp (vd: sdb sdc): " -a disks
         [ ${#disks[@]} -eq 0 ] && return 1
