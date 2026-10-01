@@ -18,12 +18,11 @@ Script yêu cầu quyền `root` và hiện sử dụng `yum` để cài đặt 
 ## ✨ Tính năng chính
 
 - Liệt kê thiết bị lưu trữ và từ chối các ổ đĩa được phát hiện là đang gắn kết.
-- Tạo phân vùng chính 10 GiB và định dạng bằng ext4, XFS hoặc ext3.
-- Tạo bố cục phân vùng sẵn sàng sử dụng với LVM trên ổ đĩa được chọn.
-- Tạo physical volume, volume group và logical volume LVM từ các thiết bị được chọn.
-- Gắn kết hệ thống tệp thông thường và LVM bên dưới `/root/Desktop`.
-- Cấu hình thư mục Samba cho khách truy cập ghi và mở dịch vụ Samba trên firewall nếu `firewalld` đang hoạt động.
-- Thử cấu hình quota người dùng cho hệ thống tệp không phải XFS.
+- Tạo một phân vùng chính có dung lượng do người dùng nhập (hoặc dùng phần dung lượng còn lại của ổ đĩa), định dạng bằng ext4, XFS hoặc ext3.
+- Chuẩn bị phân vùng kiểu LVM trên ổ đĩa được chọn, sau đó khởi tạo physical volume, volume group và logical volume từ một hay nhiều thiết bị.
+- Định dạng logical volume bằng ext4, XFS hoặc ext3 và gắn kết hệ thống tệp.
+- Tạo thư mục chia sẻ Samba cho khách truy cập không cần mật khẩu; mở dịch vụ Samba trên firewall nếu `firewalld` đang hoạt động.
+- Thử cấu hình quota cho tài khoản `client_user` trên hệ thống tệp không phải XFS.
 
 ## 🛠️ Công nghệ sử dụng
 
@@ -39,10 +38,10 @@ Script yêu cầu quyền `root` và hiện sử dụng `yum` để cài đặt 
 
 - CentOS hoặc bản phân phối Linux tương thích RHEL có `yum` và `systemd`
 - Quyền truy cập shell `root` hoặc quyền sử dụng `sudo`
-- Một ổ đĩa trống, chưa gắn kết để phân vùng; hoặc các thiết bị khối chưa gắn kết để dùng với LVM
+- Một ổ đĩa có thể bị xóa dữ liệu để phân vùng; hoặc một hay nhiều thiết bị khối chưa gắn kết để khởi tạo LVM
 - Kết nối mạng từ máy khách đến máy chủ để sử dụng Samba
 
-Khi chọn các tính năng liên quan, script sẽ cài các gói quota và Samba bằng `yum`. Các tiện ích ổ đĩa, LVM2, công cụ SELinux và `firewalld` cần được cài đặt, cấu hình phù hợp trên máy chủ. Script không tự cài đặt tất cả các thành phần cần thiết.
+Khi chạy chức năng Samba, script cài `quota`, `samba`, `samba-client` và `samba-common` bằng `yum`. Các công cụ `lsblk`, `fdisk`, `partprobe`, `mkfs`, `mount`, LVM2, tiện ích SELinux và `firewalld` (nếu dùng firewall) cần có sẵn hoặc được cấu hình phù hợp trên máy chủ. Script không tự cài đặt tất cả các thành phần cần thiết.
 
 ### Cài đặt
 
@@ -71,21 +70,23 @@ Chọn một chức năng trong menu:
 
 | Lựa chọn | Chức năng |
 | --- | --- |
-| `1` | Chọn ổ đĩa và tạo phân vùng chính 10 GiB đã định dạng hoặc bố cục phân vùng sẵn sàng cho LVM. |
-| `2` | Chọn thiết bị khối chưa gắn kết, tạo logical volume LVM, định dạng và gắn kết. |
+| `1` | Chọn ổ đĩa, nhập dung lượng phân vùng chính (hoặc nhấn Enter để dùng toàn bộ ổ), chọn hệ thống tệp và gắn kết. |
+| `2` | Chọn bước 1 để tạo phân vùng kiểu LVM, hoặc bước 2 để chọn một hay nhiều thiết bị chưa gắn kết, tạo PV/VG/LV, định dạng và gắn kết. |
 | `3` | Chọn điểm gắn kết hiện có, tạo thư mục chia sẻ và cấu hình Samba anonymous cho phép ghi, không cần mật khẩu. |
 | `0` | Thoát chương trình. |
 
-Khi phân vùng, hãy kiểm tra kỹ thiết bị đã chọn và chỉ xác nhận nếu bạn chủ ý xóa hoặc cấu hình lại thiết bị đó. Với LVM, chỉ chọn thiết bị có thể bị ghi đè dữ liệu. Quy trình thông thường và LVM lần lượt gắn kết hệ thống tệp tại `/root/Desktop/DiskLocal` và `/root/Desktop/DiskLVM`. Chức năng Samba yêu cầu nhập điểm gắn kết có sẵn, tên thư mục chia sẻ và dung lượng quota.
+Ở chức năng 1, nhập dung lượng theo định dạng `fdisk` như `+10G` hoặc `+500M`; nhấn Enter để dùng phần dung lượng còn lại. Ở chức năng 2, bước 1 chuẩn bị phân vùng LVM trên một ổ đĩa; sau khi hoàn tất, chạy lại chức năng 2 và chọn bước 2 để đưa phân vùng đó cùng các thiết bị chưa gắn kết khác vào LVM. Bước 2 tạo LV dùng toàn bộ dung lượng trống của VG. Hệ thống tệp thông thường và LVM lần lượt được gắn kết tại `/root/Desktop/DiskLocal` và `/root/Desktop/DiskLVM`.
+
+Chức năng 3 yêu cầu nhập điểm gắn kết đang hoạt động, tên thư mục chia sẻ không chứa khoảng trắng và dung lượng quota tính bằng MB. Sau đó script tạo thư mục con, cấu hình Samba anonymous và cố gắng áp dụng quota cho `client_user` trên ext3/ext4.
 
 Chương trình không có API endpoint; mọi thao tác được thực hiện qua menu trong terminal.
 
 ### Lưu ý vận hành quan trọng
 
-- Script không cấu hình nhất quán để các điểm gắn kết thông thường và LVM tự động mount sau khi khởi động lại. Hãy kiểm tra `/etc/fstab` và cấu hình mount của hệ thống trước khi dựa vào mount bền vững.
-- Quy trình Samba sửa `/etc/samba/smb.conf`, `/etc/fstab`, quyền truy cập tệp, cấu hình SELinux và dịch vụ hệ thống. Script tạo bản sao lưu `smb.conf` nếu tệp sao lưu chưa tồn tại.
+- Chức năng 1 và 2 chỉ gắn kết trong phiên hiện tại, không tự thêm cấu hình mount bền vững. Chức năng 3 ghi một mục vào `/etc/fstab` cho điểm gắn kết được chọn với các tùy chọn `usrquota,grpquota`; hãy kiểm tra mục này và cấu hình mount sau khi chạy.
+- Chức năng Samba sửa `/etc/samba/smb.conf`, `/etc/fstab`, quyền truy cập tệp, cấu hình SELinux và dịch vụ hệ thống. Script tạo bản sao lưu `smb.conf` nếu tệp sao lưu chưa tồn tại, bật và khởi động lại `smb`/`nmb`, đồng thời mở dịch vụ Samba trên `firewalld` nếu đang hoạt động.
 - Thư mục chia sẻ anonymous cho phép khách ghi dữ liệu và sử dụng quyền thư mục rộng. Hãy giới hạn truy cập mạng, không công khai dịch vụ này trên Internet.
-- Nhánh XFS của script bỏ qua thiết lập quota; nếu cần quota cho XFS, hãy cấu hình riêng.
+- Nhánh XFS chỉ ghi chú rằng cần cấu hình quota riêng; script không áp dụng quota XFS. Với hệ thống tệp khác XFS, quota có thể không hoạt động nếu các tùy chọn mount hoặc công cụ quota chưa được hỗ trợ đúng cách.
 - Hãy rà soát script trước khi sử dụng trong môi trường production. Các bước kiểm tra tương tác không thay thế cho kế hoạch sao lưu và khôi phục đã được kiểm thử.
 
 ## 📁 Cấu trúc thư mục
