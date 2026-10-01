@@ -1,4 +1,4 @@
-# Script quản lý lưu trữ CentOS và Samba
+# Script quản lý lưu trữ CentOS
 
 ![Platform](https://img.shields.io/badge/platform-CentOS%20%7C%20RHEL-262577)
 ![Shell](https://img.shields.io/badge/shell-Bash-4EAA25?logo=gnubash&logoColor=white)
