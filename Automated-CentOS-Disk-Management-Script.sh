@@ -126,16 +126,30 @@ chay_chuc_nang_partition() {
 # ==========================================================
 get_lvm_free_mb() {
     local dev=$1
+    local part_count total_bytes
+
     command -v parted >/dev/null 2>&1 || return 1
     [ -b "$dev" ] || return 1
 
-    # Chỉ tính UNALLOCATED/Free Space thật sự, không tính dung lượng trống
-    # bên trong filesystem/partition hiện hữu.
+    # Nếu ổ hoàn toàn chưa có partition nào, toàn bộ dung lượng ổ là
+    # UNALLOCATED và có thể dùng để tạo PV/partition LVM.
+    part_count=$(lsblk -nr -o TYPE "$dev" 2>/dev/null | grep -c '^part$')
+    if [ "$part_count" -eq 0 ]; then
+        total_bytes=$(lsblk -dn -b -o SIZE "$dev" 2>/dev/null)
+        [ -n "$total_bytes" ] || return 1
+        echo $((total_bytes / 1024 / 1024))
+        return 0
+    fi
+
+    # Với ổ đã có partition, chỉ tính phần UNALLOCATED/Free Space thật sự.
     parted -m -s "$dev" unit MiB print free 2>/dev/null |
-        awk -F: '$5 ~ /Free Space/ {
-            gsub(/MiB/, "", $4);
-            sum += $4
-        } END {printf "%.0f\n", sum+0}'
+        awk -F: '
+            $5 ~ /Free Space/ {
+                gsub(/MiB/, "", $4)
+                sum += $4
+            }
+            END { printf "%.0f\n", sum+0 }
+        '
 }
 
 format_gb() {
@@ -144,77 +158,92 @@ format_gb() {
 
 prepare_lvm_disk() {
     local dev=$1
-    local free_start free_end free_size
-    local new_part part_num
+    local free_start free_end free_size free_type
+    local new_part part_num part_count total_size_mb
 
-    # Chỉ làm việc với block device thật và tuyệt đối không đụng vào OS disk.
     if [ ! -b "$dev" ] || is_os_disk "$dev"; then
         return 1
     fi
 
-    # Dùng parted để tìm vùng UNALLOCATED (Free Space).
-    # Tuyệt đối không dùng "fdisk o" vì lệnh này sẽ xóa toàn bộ partition table.
     command -v parted >/dev/null 2>&1 || {
-        msg_err "Thiếu lệnh 'parted'. Hãy cài: yum install -y parted"
+        msg_err "Thiếu lệnh 'parted'. Hãy cài: yum install -y parted" >&2
         return 1
     }
 
-    msg_info "Đang quét vùng trống chưa phân vùng trên $dev..."
+    # Kiểm tra số partition hiện có.
+    part_count=$(lsblk -nr -o TYPE "$dev" 2>/dev/null | grep -c '^part$')
 
-    # Lấy vùng Free Space đầu tiên có kích thước >= 10 MiB.
-    # Output: START|END|SIZE|Free Space
-    while IFS='|' read -r free_start free_end free_size free_type; do
-        [ "$free_type" = "Free Space" ] || continue
+    # ------------------------------------------------------------------
+    # TRƯỜNG HỢP 1: Ổ hoàn toàn trống, chưa có partition table.
+    # Toàn bộ ổ được xem là vùng khả dụng.
+    # ------------------------------------------------------------------
+    if [ "$part_count" -eq 0 ]; then
+        total_size_mb=$(get_lvm_free_mb "$dev")
+        [ -n "$total_size_mb" ] && [ "$total_size_mb" -ge 10 ] || {
+            msg_warn "Ổ $dev không có đủ dung lượng khả dụng cho LVM." >&2
+            return 1
+        }
 
-        free_start="${free_start//[[:space:]]/}"
-        free_end="${free_end//[[:space:]]/}"
-        free_size="${free_size//[[:space:]]/}"
+        msg_info "Ổ $dev hoàn toàn trống: sử dụng toàn bộ $(format_gb "$total_size_mb") cho LVM." >&2
 
-        if awk "BEGIN {exit !($free_size >= 10)}"; then
-            break
+        # Nếu chưa có disk label, tạo GPT. Đây chỉ là partition table,
+        # không xóa dữ liệu vì ổ đang không có partition.
+        if ! parted -s "$dev" print >/dev/null 2>&1; then
+            parted -s "$dev" mklabel gpt || {
+                msg_err "Không thể tạo GPT partition table trên $dev." >&2
+                return 1
+            }
         fi
 
-        free_start=""
-        free_end=""
-    done < <(
-        parted -m -s "$dev" unit MiB print free 2>/dev/null |
-        awk -F: '$5 ~ /Free Space/ {gsub(/MiB/, "", $2); gsub(/MiB/, "", $3); gsub(/MiB/, "", $4); print $2 "|" $3 "|" $4 "|" $5}'
-    )
+        free_start="1MiB"
+        free_end="$((total_size_mb - 1))MiB"
+    else
+        # ------------------------------------------------------------------
+        # TRƯỜNG HỢP 2: Ổ đã có partition -> chỉ lấy vùng Free Space.
+        # ------------------------------------------------------------------
+        msg_info "Đang quét vùng UNALLOCATED trên $dev..." >&2
 
-    if [ -z "$free_start" ] || [ -z "$free_end" ]; then
-        msg_warn "Không tìm thấy vùng trống chưa phân vùng >= 10 MiB trên $dev."
-        return 1
+        while IFS='|' read -r free_start free_end free_size free_type; do
+            free_start="${free_start//[[:space:]]/}"
+            free_end="${free_end//[[:space:]]/}"
+            free_size="${free_size//[[:space:]]/}"
+            free_type="${free_type//$'\r'/}"
+
+            [ "$free_type" = "Free Space" ] || continue
+
+            if awk "BEGIN {exit !($free_size >= 10)}"; then
+                break
+            fi
+
+            free_start=""
+            free_end=""
+            free_size=""
+        done < <(
+            parted -m -s "$dev" unit MiB print free 2>/dev/null |
+            awk -F: '$5 ~ /Free Space/ {
+                gsub(/MiB/, "", $2)
+                gsub(/MiB/, "", $3)
+                gsub(/MiB/, "", $4)
+                print $2 "|" $3 "|" $4 "|" $5
+            }'
+        )
+
+        [ -n "$free_start" ] && [ -n "$free_end" ] || {
+            msg_warn "Không tìm thấy vùng UNALLOCATED >= 10 MiB trên $dev." >&2
+            return 1
+        }
     fi
 
-    msg_ok "Tìm thấy vùng trống khả dụng trên $dev: ${free_start}MiB -> ${free_end}MiB (~${free_size}MiB)"
+    msg_ok "Vùng LVM khả dụng trên $dev: ${free_start} -> ${free_end}" >&2
 
-    # Xác định số partition tiếp theo mà không ảnh hưởng các partition hiện có.
+    # Lấy số partition lớn nhất hiện có rồi +1.
     part_num=$(lsblk -nr -o PARTN "$dev" 2>/dev/null | sort -n | tail -1)
     part_num=$(( ${part_num:-0} + 1 ))
 
-    msg_info "Tạo partition LVM mới trong vùng trống: ${free_start}MiB -> ${free_end}MiB"
+    msg_info "Tạo partition LVM trong vùng ${free_start} -> ${free_end}..." >&2
 
-    # Chỉ tạo partition trong Free Space, không xóa partition cũ.
     parted -s -a optimal "$dev" unit MiB mkpart primary "$free_start" "$free_end" || {
-        msg_err "Không thể tạo partition LVM trên vùng trống của $dev."
-        return 1
-    }
-
-    partprobe "$dev" 2>/dev/null
-    udevadm settle 2>/dev/null
-    sleep 1
-
-    # Tìm partition vừa tạo theo PARTN, hỗ trợ cả /dev/sdX và /dev/nvmeXnY.
-    new_part=$(lsblk -nr -o NAME,PARTN "$dev" 2>/dev/null |
-        awk -v n="$part_num" '$2 == n {print "/dev/" $1; exit}')
-
-    if [ -z "$new_part" ] || [ ! -b "$new_part" ]; then
-        new_part=$(lsblk -nr -o NAME,TYPE "$dev" 2>/dev/null |
-            awk '$2 == "part" {last=$1} END {if (last != "") print "/dev/" last}')
-    fi
-
-    [ -b "$new_part" ] || {
-        msg_err "Không xác định được partition LVM vừa tạo trên $dev."
+        msg_err "Không thể tạo partition LVM trên vùng trống của $dev." >&2
         return 1
     }
 
@@ -225,7 +254,17 @@ prepare_lvm_disk() {
     udevadm settle 2>/dev/null
     sleep 1
 
-    msg_ok "Đã tạo partition LVM an toàn: $new_part"
+    new_part=$(lsblk -nr -o NAME,PARTN "$dev" 2>/dev/null |
+        awk -v n="$part_num" '$2 == n {print "/dev/" $1; exit}')
+
+    [ -b "$new_part" ] || {
+        msg_err "Không xác định được partition LVM vừa tạo trên $dev." >&2
+        return 1
+    }
+
+    msg_ok "Đã tạo partition LVM an toàn: $new_part" >&2
+
+    # CHỈ stdout ra device để command substitution nhận đúng giá trị.
     echo "$new_part"
 }
 
