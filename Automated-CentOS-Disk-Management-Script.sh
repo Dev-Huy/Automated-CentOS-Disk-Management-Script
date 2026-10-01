@@ -56,9 +56,15 @@ chay_chuc_nang_partition() {
     read -r -p "Chọn [1-3]: " fs_choice
 
     echo "--> Đang tạo phân vùng Primary dung lượng ${PART_SIZE:-TOÀN BỘ} trên $DISK"
-    printf "o\nn\np\n1\n\n%s\nw\n" "$PART_SIZE" | fdisk "$DISK"
-    partprobe "$DISK"
-    sleep 1
+    printf "o\nn\np\n1\n\n%s\nw\n" "$PART_SIZE" | fdisk "$DISK" >/dev/null 2>&1
+    partprobe "$DISK" 2>/dev/null
+    sleep 2
+
+    # KIỂM TRA: Phân vùng có thực sự được tạo ra không?
+    if [ ! -b "${DISK}1" ]; then
+        echo "=> [LỖI] Không thể tạo phân vùng ${DISK}1 (có thể do nhập sai dung lượng). Đã dừng lại!"
+        return 1
+    fi
 
     local FS_TYPE
     case "$fs_choice" in
@@ -68,10 +74,13 @@ chay_chuc_nang_partition() {
     esac
 
     echo "--> Format $FS_TYPE cho ${DISK}1"
-    mkfs -t "$FS_TYPE" "${DISK}1"
+    # KIỂM TRA: Lệnh format
+    mkfs -t "$FS_TYPE" "${DISK}1" || { echo "=> [LỖI] Quá trình Format thất bại!"; return 1; }
 
-    mkdir -p "$MOUNT_DIR"
-    mount "${DISK}1" "$MOUNT_DIR"
+    # KIỂM TRA: Lệnh tạo thư mục và mount
+    mkdir -p "$MOUNT_DIR" || { echo "=> [LỖI] Không thể tạo thư mục $MOUNT_DIR"; return 1; }
+    mount "${DISK}1" "$MOUNT_DIR" || { echo "=> [LỖI] Không thể gắn kết (Mount) phân vùng vào thư mục!"; return 1; }
+
     echo "[OK] Đã gắn kết ${DISK}1 vào $MOUNT_DIR."
     echo "=> Ổ đĩa đã sẵn sàng để sử dụng hoặc chia sẻ qua Chức năng 3."
 }
@@ -95,9 +104,16 @@ setup_lvm() {
         [ "$ok" != "y" ] && [ "$ok" != "Y" ] && { echo "Đã hủy."; return 0; }
 
         echo "--> Đang tạo phân vùng Extended và Logical (type 8e) dung lượng ${PART_SIZE:-TOÀN BỘ} trên $DISK"
-        printf "o\nn\ne\n1\n\n%s\nn\nl\n\n\nt\n5\n8e\nw\n" "$PART_SIZE" | fdisk "$DISK"
-        partprobe "$DISK"
-        sleep 1
+        printf "o\nn\ne\n1\n\n%s\nn\nl\n\n\nt\n5\n8e\nw\n" "$PART_SIZE" | fdisk "$DISK" >/dev/null 2>&1
+        partprobe "$DISK" 2>/dev/null
+        sleep 2
+        
+        # KIỂM TRA: Phân vùng ảo 8e có được tạo không?
+        if [ ! -b "${DISK}5" ]; then
+            echo "=> [LỖI] Không thể tạo phân vùng LVM ${DISK}5. Vui lòng kiểm tra lại!"
+            return 1
+        fi
+        
         echo "[OK] Phân vùng ${DISK}5 (type 8e) đã được tạo thành công."
         echo "=> Hãy tiếp tục chọn lại Chức năng 2 (Bước 2) để gộp phân vùng này vào hệ thống LVM."
         return 0
@@ -139,9 +155,9 @@ setup_lvm() {
         [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && return 0
 
         echo "--> Đang khởi tạo LVM..."
-        pvcreate "${DEVICES[@]}" || return 1
-        vgcreate "$VG_NAME" "${DEVICES[@]}" || return 1
-        lvcreate -l 100%FREE -n "$LV_NAME" "$VG_NAME" || return 1
+        pvcreate "${DEVICES[@]}" || { echo "=> [LỖI] pvcreate thất bại!"; return 1; }
+        vgcreate "$VG_NAME" "${DEVICES[@]}" || { echo "=> [LỖI] vgcreate thất bại!"; return 1; }
+        lvcreate -l 100%FREE -n "$LV_NAME" "$VG_NAME" || { echo "=> [LỖI] lvcreate thất bại!"; return 1; }
 
         local LV_TARGET="/dev/$VG_NAME/$LV_NAME"
         
@@ -156,10 +172,10 @@ setup_lvm() {
         esac
 
         echo "--> Định dạng $FS_TYPE cho $LV_TARGET..."
-        mkfs -t "$FS_TYPE" "$LV_TARGET" || return 1
+        mkfs -t "$FS_TYPE" "$LV_TARGET" || { echo "=> [LỖI] Format ổ ảo LVM thất bại!"; return 1; }
         
-        mkdir -p "$MOUNT_DIR"
-        mount "$LV_TARGET" "$MOUNT_DIR" || return 1
+        mkdir -p "$MOUNT_DIR" || { echo "=> [LỖI] Không thể tạo thư mục $MOUNT_DIR"; return 1; }
+        mount "$LV_TARGET" "$MOUNT_DIR" || { echo "=> [LỖI] Không thể gắn kết (Mount) LVM!"; return 1; }
         
         echo "[OK] Ổ ảo LVM $LV_TARGET đã được mount tại $MOUNT_DIR."
         echo "=> Sẵn sàng sử dụng hoặc dùng Chức năng 3 để cấu hình File Server."
@@ -205,8 +221,10 @@ setup_anonymous_samba_quota() {
     # 2. Tạo thư mục con & Phân quyền Anonymous
     SHARE_PATH="$MOUNT_DIR/$SHARE_DIR"
     echo "--> Đang tạo và phân quyền cho không gian chia sẻ: $SHARE_PATH"
-    mkdir -p "$SHARE_PATH"
-    chmod -R 777 "$SHARE_PATH"
+    
+    # KIỂM TRA: Tạo thư mục chia sẻ
+    mkdir -p "$SHARE_PATH" || { echo "=> [LỖI] Không thể tạo thư mục chia sẻ!"; return 1; }
+    chmod -R 777 "$SHARE_PATH" || { echo "=> [LỖI] Lỗi khi cấp quyền 777 cho thư mục!"; return 1; }
     chcon -Rt samba_share_t "$SHARE_PATH" 2>/dev/null
 
     # 3. Cập nhật Quota trên ổ đĩa đã mount
@@ -216,7 +234,9 @@ setup_anonymous_samba_quota() {
 
     sed -i "\|[[:space:]]$MOUNT_DIR[[:space:]]|d" /etc/fstab
     echo "$TARGET_DEV $MOUNT_DIR $CURRENT_FS defaults,usrquota,grpquota 0 0" >> /etc/fstab
-    mount -o remount,usrquota,grpquota "$MOUNT_DIR"
+    
+    # Cảnh báo nếu không thể remount thay vì dừng hẳn script
+    mount -o remount,usrquota,grpquota "$MOUNT_DIR" || echo "=> [CẢNH BÁO] Không thể remount ổ đĩa để ép Quota. Tiếp tục cấu hình Samba..."
 
     if [[ "$CURRENT_FS" != "xfs" ]]; then
         quotacheck -cugm "$MOUNT_DIR" 2>/dev/null
@@ -268,7 +288,10 @@ EOF
     fi
 
     systemctl enable smb nmb &>/dev/null
-    systemctl restart smb nmb
+    
+    # KIỂM TRA: Khởi động lại dịch vụ Samba
+    systemctl restart smb nmb || { echo "=> [LỖI] Không thể khởi động dịch vụ Samba!"; return 1; }
+    
     echo "[OK] Chia sẻ thành công! Truy cập không cần mật khẩu qua: \\\\<IP>\\$SHARE_DIR"
 }
 
