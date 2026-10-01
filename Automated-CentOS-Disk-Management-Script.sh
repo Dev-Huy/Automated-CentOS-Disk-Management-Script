@@ -49,7 +49,10 @@ format_and_mount() {
 }
 
 chon_o_dia() {
-    msg_info "DANH SÁCH Ổ ĐĨA KHẢ DỤNG (Đã ẩn đĩa OS, đĩa đầy hoặc max 4 phân vùng)"
+    # Hàm này được gọi bằng command substitution: disk=$(chon_o_dia)
+    # Vì vậy stdout chỉ được phép chứa device cuối cùng (/dev/sdX).
+    # Toàn bộ nội dung giao diện được đưa sang stderr để hiển thị ngay.
+    msg_info "DANH SÁCH Ổ ĐĨA KHẢ DỤNG (Đã ẩn đĩa OS, đĩa đầy hoặc max 4 phân vùng)" >&2
     local disks=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk" && $1!="sr0" && !/loop/ {print $1}')
     local has_disk=0
     
@@ -62,21 +65,23 @@ chon_o_dia() {
         [ "$free_mb" -lt 10 ] && continue
         
         has_disk=1
-        echo "-----------------------------------------------------------------"
-        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$dev"
-        echo "=> Ổ $d: $(get_part_count "$dev")/4 phân vùng | Trống ước tính: ~${free_mb} MB"
+        echo "-----------------------------------------------------------------" >&2
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$dev" >&2
+        echo "=> Ổ $d: $(get_part_count "$dev")/4 phân vùng | Trống ước tính: ~${free_mb} MB" >&2
     done
-    echo "-----------------------------------------------------------------"
+    echo "-----------------------------------------------------------------" >&2
 
-    [ $has_disk -eq 0 ] && { msg_err "Không có ổ đĩa nào khả dụng."; return 1; }
+    [ "$has_disk" -eq 0 ] && { msg_err "Không có ổ đĩa nào khả dụng." >&2; return 1; }
     
     read -r -p "Nhập tên ổ đĩa muốn thao tác (vd: sdb): " name
     local target="/dev/$name"
     
     if [ ! -b "$target" ] || is_os_disk "$target" || [ "$(get_part_count "$target")" -ge 4 ] || [ "$(get_free_mb "$target")" -lt 10 ]; then
-        msg_err "Ổ đĩa không hợp lệ, đầy dung lượng hoặc bị từ chối truy cập."
+        msg_err "Ổ đĩa không hợp lệ, đầy dung lượng hoặc bị từ chối truy cập." >&2
         return 1
     fi
+
+    # Chỉ stdout: giá trị trả về cho command substitution ở caller.
     echo "$target"
 }
 
