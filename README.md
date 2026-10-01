@@ -1,104 +1,102 @@
-# Automated CentOS Disk Management Script
+# Script Tự Động Quản Lý Ổ Đĩa CentOS
 
 ![Platform](https://img.shields.io/badge/platform-CentOS%20%7C%20RHEL-262577)
 ![Shell](https://img.shields.io/badge/shell-Bash-4EAA25?logo=gnubash&logoColor=white)
-![License](https://img.shields.io/badge/license-see%20LICENSE-blue)
+![License](https://img.shields.io/badge/license-xem%20LICENSE-blue)
 
-A menu-driven Bash utility for preparing Linux disks, creating LVM storage, mounting filesystems, and configuring writable anonymous Samba shares.
+Tiện ích Bash dạng menu giúp chuẩn bị ổ đĩa Linux, tạo vùng lưu trữ LVM, gắn kết hệ thống tệp và cấu hình thư mục chia sẻ Samba cho phép khách truy cập ghi mà không cần mật khẩu.
 
 > [!WARNING]
-> This script performs privileged disk operations. Partitioning, formatting, and LVM initialization can permanently destroy data. Anonymous Samba shares are writable without a password and are not suitable for untrusted networks. Review the script and back up important data before running it.
+> Script thực hiện các thao tác ổ đĩa với quyền quản trị. Việc phân vùng, định dạng và khởi tạo LVM có thể xóa dữ liệu vĩnh viễn. Thư mục Samba anonymous cho phép ghi mà không cần mật khẩu, không phù hợp với mạng không đáng tin cậy. Hãy đọc mã nguồn và sao lưu dữ liệu quan trọng trước khi chạy.
 
-## 🧭 About the Project
+## 🧭 Giới thiệu
 
-The project provides an interactive workflow for common storage administration tasks on CentOS and compatible RHEL-based systems. It is intended for lab environments and administrators who understand the implications of partitioning disks and exposing network shares.
+Dự án cung cấp quy trình tương tác để thực hiện các tác vụ quản lý lưu trữ phổ biến trên CentOS và các hệ thống tương thích với RHEL. Công cụ phù hợp với môi trường thử nghiệm và quản trị viên hiểu rõ rủi ro khi phân vùng ổ đĩa hoặc chia sẻ dữ liệu qua mạng.
 
-The script requires root privileges and currently uses `yum` for package installation. It does not provide an HTTP service or API.
+Script yêu cầu quyền `root` và hiện sử dụng `yum` để cài đặt gói. Dự án không cung cấp dịch vụ HTTP hay API.
 
-## ✨ Key Features
+## ✨ Tính năng chính
 
-- Lists block devices and rejects selected disks that appear to be mounted.
-- Creates a 10 GiB primary partition and formats it as ext4, XFS, or ext3.
-- Creates an LVM-ready partition layout on a selected disk.
-- Builds an LVM physical volume, volume group, and logical volume from selected devices.
-- Mounts standard and LVM filesystems under `/root/Desktop`.
-- Configures a writable guest Samba share and opens the Samba firewall service when `firewalld` is active.
-- Attempts to configure user quota for non-XFS filesystems.
+- Liệt kê thiết bị lưu trữ và từ chối các ổ đĩa được phát hiện là đang gắn kết.
+- Tạo phân vùng chính 10 GiB và định dạng bằng ext4, XFS hoặc ext3.
+- Tạo bố cục phân vùng sẵn sàng sử dụng với LVM trên ổ đĩa được chọn.
+- Tạo physical volume, volume group và logical volume LVM từ các thiết bị được chọn.
+- Gắn kết hệ thống tệp thông thường và LVM bên dưới `/root/Desktop`.
+- Cấu hình thư mục Samba cho khách truy cập ghi và mở dịch vụ Samba trên firewall nếu `firewalld` đang hoạt động.
+- Thử cấu hình quota người dùng cho hệ thống tệp không phải XFS.
 
-## 🛠️ Built With
+## 🛠️ Công nghệ sử dụng
 
-- **Bash** for the interactive command-line workflow
-- **Linux storage tools:** `lsblk`, `fdisk`, `partprobe`, `mkfs`, `mount`, and `df`
-- **LVM2:** `pvcreate`, `vgcreate`, and `lvcreate`
-- **Samba:** `smb`, `nmb`, and `smb.conf`
-- **Quota and system administration tools:** `quota`, `systemctl`, `firewall-cmd`, and SELinux utilities
+- **Bash** cho quy trình dòng lệnh tương tác
+- **Công cụ lưu trữ Linux:** `lsblk`, `fdisk`, `partprobe`, `mkfs`, `mount` và `df`
+- **LVM2:** `pvcreate`, `vgcreate` và `lvcreate`
+- **Samba:** `smb`, `nmb` và `smb.conf`
+- **Quota và công cụ quản trị hệ thống:** `quota`, `systemctl`, `firewall-cmd` và tiện ích SELinux
 
-## 🚀 Getting Started
+## 🚀 Bắt đầu
 
-### Prerequisites
+### Yêu cầu
 
-- CentOS or a compatible RHEL-based Linux distribution with `yum` and `systemd`
-- A root shell or `sudo` access
-- A spare, unmounted disk for partitioning, or unmounted block devices for LVM
-- Network access from clients to the host for Samba usage
+- CentOS hoặc bản phân phối Linux tương thích RHEL có `yum` và `systemd`
+- Quyền truy cập shell `root` hoặc quyền sử dụng `sudo`
+- Một ổ đĩa trống, chưa gắn kết để phân vùng; hoặc các thiết bị khối chưa gắn kết để dùng với LVM
+- Kết nối mạng từ máy khách đến máy chủ để sử dụng Samba
 
-The script installs quota and Samba packages through `yum` when those features are selected. Disk utilities, LVM2, SELinux tools, and `firewalld` should be installed and configured as appropriate for the host. The script does not install every prerequisite automatically.
+Khi chọn các tính năng liên quan, script sẽ cài các gói quota và Samba bằng `yum`. Các tiện ích ổ đĩa, LVM2, công cụ SELinux và `firewalld` cần được cài đặt, cấu hình phù hợp trên máy chủ. Script không tự cài đặt tất cả các thành phần cần thiết.
 
-### Installation
+### Cài đặt
 
-Clone the repository and enter its directory:
+Clone repository và chuyển vào thư mục dự án:
 
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+git clone https://github.com/Dev-Huy/Automated-CentOS-Disk-Management-Script.git
+cd Automated-CentOS-Disk-Management-Script
 ```
 
-Make the script executable:
+Cấp quyền thực thi cho script:
 
 ```bash
 chmod +x Automated-CentOS-Disk-Management-Script.sh
 ```
 
-Replace the placeholders above with the URL and directory name of your repository.
+## 💻 Cách sử dụng
 
-## 💻 Usage
-
-Run the script as root:
+Chạy script với quyền quản trị:
 
 ```bash
 sudo ./Automated-CentOS-Disk-Management-Script.sh
 ```
 
-Choose an option from the interactive menu:
+Chọn một chức năng trong menu:
 
-| Menu option | Operation |
+| Lựa chọn | Chức năng |
 | --- | --- |
-| `1` | Select a disk and create either a 10 GiB formatted primary partition or an LVM-ready partition layout. |
-| `2` | Select unmounted block devices, create an LVM volume, format it, and mount it. |
-| `3` | Select an existing mount point, create a share directory, and configure an anonymous writable Samba share. |
-| `0` | Exit. |
+| `1` | Chọn ổ đĩa và tạo phân vùng chính 10 GiB đã định dạng hoặc bố cục phân vùng sẵn sàng cho LVM. |
+| `2` | Chọn thiết bị khối chưa gắn kết, tạo logical volume LVM, định dạng và gắn kết. |
+| `3` | Chọn điểm gắn kết hiện có, tạo thư mục chia sẻ và cấu hình Samba anonymous cho phép ghi, không cần mật khẩu. |
+| `0` | Thoát chương trình. |
 
-For partitioning, verify the selected device carefully and confirm only when you intend to erase or reconfigure it. For LVM, use only devices whose contents can be overwritten. The standard and LVM workflows mount their filesystems at `/root/Desktop/DiskLocal` and `/root/Desktop/DiskLVM`, respectively. Selecting the Samba option prompts for an existing mount point, share name, and quota size.
+Khi phân vùng, hãy kiểm tra kỹ thiết bị đã chọn và chỉ xác nhận nếu bạn chủ ý xóa hoặc cấu hình lại thiết bị đó. Với LVM, chỉ chọn thiết bị có thể bị ghi đè dữ liệu. Quy trình thông thường và LVM lần lượt gắn kết hệ thống tệp tại `/root/Desktop/DiskLocal` và `/root/Desktop/DiskLVM`. Chức năng Samba yêu cầu nhập điểm gắn kết có sẵn, tên thư mục chia sẻ và dung lượng quota.
 
-There are no API endpoints; all interaction is through the script's terminal menu.
+Chương trình không có API endpoint; mọi thao tác được thực hiện qua menu trong terminal.
 
-### Important operational notes
+### Lưu ý vận hành quan trọng
 
-- The script does not consistently configure the standard and LVM mount points for automatic mounting after reboot. Verify `/etc/fstab` and your system's mount configuration before relying on persistent mounts.
-- The Samba workflow modifies `/etc/samba/smb.conf`, `/etc/fstab`, file permissions, SELinux settings, and system services. It creates a backup of `smb.conf` if one does not already exist.
-- The anonymous share grants guest write access and uses permissive directory modes. Restrict network access and do not expose it to the public internet.
-- The script's XFS branch explicitly skips quota setup; configure XFS quotas separately if required.
-- Review the script before production use. Its interactive checks do not replace a tested backup and recovery plan.
+- Script không cấu hình nhất quán để các điểm gắn kết thông thường và LVM tự động mount sau khi khởi động lại. Hãy kiểm tra `/etc/fstab` và cấu hình mount của hệ thống trước khi dựa vào mount bền vững.
+- Quy trình Samba sửa `/etc/samba/smb.conf`, `/etc/fstab`, quyền truy cập tệp, cấu hình SELinux và dịch vụ hệ thống. Script tạo bản sao lưu `smb.conf` nếu tệp sao lưu chưa tồn tại.
+- Thư mục chia sẻ anonymous cho phép khách ghi dữ liệu và sử dụng quyền thư mục rộng. Hãy giới hạn truy cập mạng, không công khai dịch vụ này trên Internet.
+- Nhánh XFS của script bỏ qua thiết lập quota; nếu cần quota cho XFS, hãy cấu hình riêng.
+- Hãy rà soát script trước khi sử dụng trong môi trường production. Các bước kiểm tra tương tác không thay thế cho kế hoạch sao lưu và khôi phục đã được kiểm thử.
 
-## 📁 Directory Structure
+## 📁 Cấu trúc thư mục
 
 ```text
 .
-├── Automated-CentOS-Disk-Management-Script.sh  # Interactive storage and Samba utility
-├── LICENSE                                      # Project license
-└── README.md                                    # Project documentation
+├── Automated-CentOS-Disk-Management-Script.sh  # Script quản lý lưu trữ và Samba
+├── LICENSE                                      # Thông tin giấy phép dự án
+└── README.md                                    # Tài liệu dự án
 ```
 
-## 📄 License
+## 📄 Giấy phép
 
-See the [LICENSE](LICENSE) file for license details.
+Xem tệp [LICENSE](LICENSE) để biết thông tin chi tiết về giấy phép.
