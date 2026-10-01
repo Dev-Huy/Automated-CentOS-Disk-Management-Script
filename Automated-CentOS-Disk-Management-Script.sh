@@ -154,13 +154,35 @@ chay_chuc_nang_partition() {
 # ==========================================================
 # MODULE 4: LVM MANAGEMENT (Nghiệp vụ Ổ đĩa ảo)
 # ==========================================================
+# ==========================================================
+# MODULE 4: LVM MANAGEMENT (Đã sửa lại để không làm mất phân vùng cũ)
+# ==========================================================
 prepare_lvm_disk() {
     local dev=$1
     if [ -b "$dev" ] && ! is_os_disk "$dev"; then
-        msg_info "Đang ép mã 8e cho $dev..." >&2
-        printf "o\nn\np\n1\n\n\nt\n8e\nw\n" | fdisk "$dev" >/dev/null 2>&1
-        partprobe "$dev" 2>/dev/null; sleep 1
-        [ -b "${dev}1" ] && echo "${dev}1"
+        msg_info "Đang kiểm tra không gian trống trên $dev để tạo phân vùng LVM mới..." >&2
+        
+        # Lưu lại danh sách phân vùng hiện tại để so sánh
+        local old_parts=$(lsblk -nr -o NAME "$dev" 2>/dev/null)
+        
+        # Dùng 'n' để tạo phân vùng mới trên không gian TRỐNG (Không dùng 'o' để tránh xóa dữ liệu cũ)
+        # Các dấu xuống dòng \n\n\n tương ứng với default: partition number, first sector, last sector (dùng hết chỗ trống còn lại)
+        printf "n\np\n\n\n\nt\n8e\nw\n" | fdisk "$dev" >/dev/null 2>&1
+        partprobe "$dev" 2>/dev/null; sleep 2
+        
+        # Dò tìm phân vùng LVM vừa mới được sinh thêm
+        local new_lvm_part=""
+        for p in $(lsblk -nr -o NAME "$dev" 2>/dev/null); do
+            ! echo "$old_parts" | grep -q "^$p$" && new_lvm_part="/dev/$p" && break
+        done
+        
+        if [ -n "$new_lvm_part" ]; then
+            msg_ok "Đã tạo thành công phân vùng LVM an toàn trên khoảng trống: $new_lvm_part" >&2
+            echo "$new_lvm_part"
+        else
+            msg_err "Không tìm thấy khoảng trống khả dụng trên $dev để tạo LVM." >&2
+            return 1
+        fi
     fi
 }
 
