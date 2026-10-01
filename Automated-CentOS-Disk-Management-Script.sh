@@ -52,13 +52,16 @@ get_part_count() {
 get_free_mb() {
     local dev=$1
     if command -v parted &> /dev/null; then
-        # Nếu có parted, lấy dung lượng trống chính xác tuyệt đối
-        parted -m "$dev" unit MB print free 2>/dev/null | awk -F: '$3=="free;" {sum+=$2} END {print int(sum)}'
+        # Ép đơn vị tính về Byte (unit B), tìm chính xác dòng chứa chữ "free;" và lấy cột dung lượng ($4)
+        local free_bytes=$(parted -sm "$dev" unit B print free 2>/dev/null | grep -i "free;" | awk -F: '{sum+=int($4)} END {print sum}')
+        
+        # Nếu lệnh lỗi hoặc trả về rỗng, mặc định là 0
+        echo $(( ${free_bytes:-0} / 1024 / 1024 ))
     else
-        # Fallback an toàn: Dùng lsblk nhưng loại trừ các phân vùng Extended (tránh cộng đúp)
-        local tot=$(lsblk -dnr -b -o SIZE "$dev")
-        local usd=$(lsblk -nr -b -o SIZE,TYPE,PTTYPE "$dev" | awk '$2=="part" && $3!="0x5" && $3!="0xf" {sum+=$1} END {print sum+0}')
-        echo $(((tot - usd) / 1024 / 1024))
+        # Phương án dự phòng nếu máy chủ chưa cài parted
+        local tot=$(lsblk -dnr -b -o SIZE "$dev" 2>/dev/null)
+        local usd=$(lsblk -nr -b -o SIZE,TYPE "$dev" 2>/dev/null | awk '$2=="part" {sum+=$1} END {print sum+0}')
+        echo $(( (tot - usd) / 1024 / 1024 ))
     fi
 }
 
