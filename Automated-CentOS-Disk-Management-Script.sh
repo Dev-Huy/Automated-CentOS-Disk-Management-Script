@@ -9,14 +9,16 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 TARGET_USER=""
+TARGET_DISK=""
 
 # ==========================================================
 # MODULE 1: CORE & UI (Giao diện & Tiện ích cốt lõi)
+# Chuyển hướng log ra >&2 để bảo vệ luồng dữ liệu biến toàn cục
 # ==========================================================
-msg_info() { echo -e "\n--> $1"; }
-msg_ok()   { echo -e "[OK] $1"; }
-msg_err()  { echo -e "=> [LỖI] $1"; }
-msg_warn() { echo -e "=> [CẢNH BÁO] $1"; }
+msg_info() { echo -e "\n--> $1" >&2; }
+msg_ok()   { echo -e "[OK] $1" >&2; }
+msg_err()  { echo -e "=> [LỖI] $1" >&2; }
+msg_warn() { echo -e "=> [CẢNH BÁO] $1" >&2; }
 
 get_fs_and_force_flag() {
     case "$1" in
@@ -38,31 +40,31 @@ format_and_mount() {
 
 # ==========================================================
 # MODULE 2: RAW DISK CALCULATOR (Dành riêng cho Partition & LVM)
-# Các hàm tính toán vật lý này KHÔNG liên quan đến Quota & Samba
+# Đã khắc phục triệt để lỗi ẩn ổ đĩa mới/chưa khởi tạo nhờ Fail-safe
 # ==========================================================
 is_os_disk() { 
-    lsblk -nr -o MOUNTPOINT "$1" | grep -qE '^/$|^/boot' 
+    lsblk -nr -o MOUNTPOINT "$1" 2>/dev/null | grep -qE '^/$|^/boot' 
 }
 
 get_part_count() { 
-    lsblk -nr -o TYPE "$1" | grep -c "part" 
+    local count=$(lsblk -nr -o TYPE "$1" 2>/dev/null | grep -c "part")
+    echo "${count:-0}"
 }
 
-# Thuật toán đã được fix lỗi "Double Counting" gây ẩn đĩa
 get_free_mb() {
     local dev=$1
-    if command -v parted &> /dev/null; then
-        # Ép đơn vị tính về Byte (unit B), tìm chính xác dòng chứa chữ "free;" và lấy cột dung lượng ($4)
-        local free_bytes=$(parted -sm "$dev" unit B print free 2>/dev/null | grep -i "free;" | awk -F: '{sum+=int($4)} END {print sum}')
-        
-        # Nếu lệnh lỗi hoặc trả về rỗng, mặc định là 0
-        echo $(( ${free_bytes:-0} / 1024 / 1024 ))
-    else
-        # Phương án dự phòng nếu máy chủ chưa cài parted
-        local tot=$(lsblk -dnr -b -o SIZE "$dev" 2>/dev/null)
-        local usd=$(lsblk -nr -b -o SIZE,TYPE "$dev" 2>/dev/null | awk '$2=="part" {sum+=$1} END {print sum+0}')
-        echo $(( (tot - usd) / 1024 / 1024 ))
-    fi
+    # Lấy tổng dung lượng (Byte), dùng grep lọc sạch chữ cái
+    local tot=$(lsblk -dnr -b -o SIZE "$dev" 2>/dev/null | grep -Eo '[0-9]+' | head -n 1)
+    tot=${tot:-0}
+
+    # Lấy dung lượng đã dùng, bỏ qua extended partition để tránh cộng đúp
+    local usd=$(lsblk -nr -b -o SIZE,TYPE,FSTYPE "$dev" 2>/dev/null | awk '$2=="part" && $3!="extended" {sum+=$1} END {print sum+0}')
+    usd=${usd:-0}
+
+    local free_bytes=$((tot - usd))
+    [ "$free_bytes" -lt 0 ] && free_bytes=0
+
+    echo $((free_bytes / 1024 / 1024))
 }
 
 chon_o_dia() {
@@ -77,16 +79,15 @@ chon_o_dia() {
         local p_count=$(get_part_count "$dev")
         local free_mb=$(get_free_mb "$dev")
         
-        # Bỏ qua ổ đĩa đã chia max 4 phân vùng hoặc còn trống dưới 10MB
         [ "$p_count" -ge 4 ] && continue
         [ -n "$free_mb" ] && [ "$free_mb" -lt 10 ] && continue
         
         has_disk=1
-        echo "-----------------------------------------------------------------"
-        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$dev"
-        echo "=> Ổ $d: Đang có $p_count/4 phân vùng | Trống ước tính: ~${free_mb} MB"
+        echo "-----------------------------------------------------------------" >&2
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$dev" >&2
+        echo "=> Ổ $d: Đang có $p_count/4 phân vùng | Trống ước tính: ~${free_mb} MB" >&2
     done
-    echo "-----------------------------------------------------------------"
+    echo "-----------------------------------------------------------------" >&2
 
     [ $has_disk -eq 0 ] && { msg_err "Không có ổ đĩa vật lý nào khả dụng."; return 1; }
     
@@ -97,16 +98,17 @@ chon_o_dia() {
         msg_err "Ổ đĩa không hợp lệ hoặc chứa hệ điều hành."
         return 1
     fi
-    echo "$target"
+    
+    TARGET_DISK="$target"
+    return 0
 }
 
 # ==========================================================
 # MODULE 3: PARTITION MANAGEMENT (Nghiệp vụ Phân vùng)
 # ==========================================================
 chay_chuc_nang_partition() {
-    # Gọi hàm từ Module 2
-    local disk=$(chon_o_dia)
-    [ -z "$disk" ] && return 1
+    chon_o_dia || return 1
+    local disk="$TARGET_DISK"
 
     msg_info "CHẾ ĐỘ AN TOÀN: Giữ nguyên dữ liệu cũ, chỉ tạo thêm phân vùng."
     read -r -p "Tiếp tục? (y/N): " ok
@@ -114,7 +116,7 @@ chay_chuc_nang_partition() {
 
     read -r -p "Nhập dung lượng (vd: +1G, +500M) hoặc Enter để dùng toàn bộ: " part_size
     
-    # Auto-Sanitize đầu vào để tránh lỗi fdisk (Tự động lọc chữ và thêm dấu +)
+    # Auto-Sanitize đầu vào
     if [ -n "$part_size" ]; then
         part_size=$(echo "$part_size" | tr -d ' ' | sed 's/[bB]$//' | tr '[:lower:]' '[:upper:]')
         [[ ! "$part_size" =~ ^[+-] ]] && part_size="+$part_size"
@@ -154,9 +156,8 @@ chay_chuc_nang_partition() {
 # ==========================================================
 prepare_lvm_disk() {
     local dev=$1
-    # Gọi hàm is_os_disk từ Module 2
     if [ -b "$dev" ] && ! is_os_disk "$dev"; then
-        msg_info "Đang ép mã 8e cho $dev..."
+        msg_info "Đang ép mã 8e cho $dev..." >&2
         printf "o\nn\np\n1\n\n\nt\n8e\nw\n" | fdisk "$dev" >/dev/null 2>&1
         partprobe "$dev" 2>/dev/null; sleep 1
         [ -b "${dev}1" ] && echo "${dev}1"
@@ -231,7 +232,7 @@ setup_lvm() {
 }
 
 # ==========================================================
-# MODULE 5: QUOTA MANAGEMENT (Độc lập, làm việc với Mount Point)
+# MODULE 5: USER & QUOTA MANAGEMENT (Độc lập, làm việc với Mount Point)
 # ==========================================================
 chon_user_he_thong() {
     local user_list=$(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' /etc/passwd)
@@ -342,7 +343,7 @@ EOF
 }
 
 # ==========================================================
-# MODULE 7: ROUTER (Menu)
+# MODULE 7: ROUTER (Menu điều hướng chính)
 # ==========================================================
 while true; do
     echo -e "\n=========================================================="
