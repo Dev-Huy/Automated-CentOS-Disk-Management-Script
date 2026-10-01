@@ -1,319 +1,375 @@
 #!/bin/bash
-# ==========================================================
-# SCRIPT QUẢN LÝ LƯU TRỮ VÀ SHARE DISK (BẢN HOÀN THIỆN)
-# Kiến trúc: Độc lập - Module hóa - Phân quyền Anonymous
-# ==========================================================
+# ==============================================================================
+# SCRIPT QUẢN LÝ LƯU TRỮ VÀ SHARE DISK (BẢN HOÀN THIỆN - AGILE & DECOUPLED)
+# Kiến trúc: Feature-Sliced Design (Độc lập module, Đơn nhiệm, An toàn dữ liệu)
+# ==============================================================================
 
 if [ "$EUID" -ne 0 ]; then
     echo "Hãy chạy script bằng quyền root (sudo ./quan_ly_centos_samba.sh)"
     exit 1
 fi
 
-DISK=""
-TEST_USER="client_user"
+TARGET_USER=""
 
 # ==========================================================
-# 1. NHÓM HÀM PARTITION (Tạo đĩa dùng ngay, Format & Mount)
+# MODULE 1: CORE & UI (Giao diện & Tiện ích cốt lõi)
 # ==========================================================
+msg_info() { echo -e "\n--> $1"; }
+msg_ok()   { echo -e "[OK] $1"; }
+msg_err()  { echo -e "=> [LỖI] $1"; }
+msg_warn() { echo -e "=> [CẢNH BÁO] $1"; }
+
+# ==========================================================
+# MODULE 2: DISK & PARTITION (Phân vùng an toàn & Tự động)
+# ==========================================================
+is_os_disk() { lsblk -nr -o MOUNTPOINT "$1" | grep -qE '^/$|^/boot'; }
+get_part_count() { lsblk -nr -o TYPE "$1" | grep -c "part"; }
+get_free_mb() {
+    local tot=$(lsblk -dnr -b -o SIZE "$1")
+    local usd=$(lsblk -nr -b -o SIZE,TYPE "$1" | awk '$2=="part" {sum+=$1} END {print sum+0}')
+    echo $(((tot - usd) / 1024 / 1024))
+}
+
+get_fs_and_force_flag() {
+    case "$1" in
+        2) echo "xfs -f" ;;
+        3) echo "ext3 -F" ;;
+        *) echo "ext4 -F" ;;
+    esac
+}
+
+format_and_mount() {
+    local dev=$1 fs_type=$2 force_flag=$3 mount_dir=$4
+    msg_info "Format $fs_type cho $dev..."
+    mkfs -t "$fs_type" $force_flag "$dev" || { msg_err "Format thất bại!"; return 1; }
+    
+    mkdir -p "$mount_dir" || { msg_err "Lỗi tạo thư mục $mount_dir"; return 1; }
+    mount "$dev" "$mount_dir" || { msg_err "Lỗi mount $dev"; return 1; }
+    msg_ok "Đã gắn kết $dev vào $mount_dir"
+}
+
 chon_o_dia() {
-    echo
-    echo "=== Danh sach o dia ==="
-    lsblk -d -o NAME,SIZE,TYPE,MOUNTPOINT
-    echo
-    read -r -p "Nhap ten o dia can dung (vd: sdb): " name
-    DISK="/dev/$name"
-    if [ ! -b "$DISK" ]; then
-        echo "Khong tim thay $DISK"
-        DISK=""
+    msg_info "DANH SÁCH Ổ ĐĨA KHẢ DỤNG (Đã ẩn đĩa OS, đĩa đầy hoặc max 4 phân vùng)"
+    local disks=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk" && $1!="sr0" && !/loop/ {print $1}')
+    local has_disk=0
+    
+    for d in $disks; do
+        local dev="/dev/$d"
+        is_os_disk "$dev" && continue
+        [ "$(get_part_count "$dev")" -ge 4 ] && continue
+        
+        local free_mb=$(get_free_mb "$dev")
+        [ "$free_mb" -lt 10 ] && continue
+        
+        has_disk=1
+        echo "-----------------------------------------------------------------"
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$dev"
+        echo "=> Ổ $d: $(get_part_count "$dev")/4 phân vùng | Trống ước tính: ~${free_mb} MB"
+    done
+    echo "-----------------------------------------------------------------"
+
+    [ $has_disk -eq 0 ] && { msg_err "Không có ổ đĩa nào khả dụng."; return 1; }
+    
+    read -r -p "Nhập tên ổ đĩa muốn thao tác (vd: sdb): " name
+    local target="/dev/$name"
+    
+    if [ ! -b "$target" ] || is_os_disk "$target" || [ "$(get_part_count "$target")" -ge 4 ] || [ "$(get_free_mb "$target")" -lt 10 ]; then
+        msg_err "Ổ đĩa không hợp lệ, đầy dung lượng hoặc bị từ chối truy cập."
         return 1
     fi
-    if lsblk -nr -o MOUNTPOINT "$DISK" | grep -q '[^[:space:]]'; then
-        echo "TU CHOI: $DISK dang duoc mount (co the la o chua he dieu hanh)."
-        DISK=""
-        return 1
-    fi
-    echo "Da chon: $DISK"
+    echo "$target"
 }
 
 chay_chuc_nang_partition() {
-    echo "=== TẠO PHÂN VÙNG LƯU TRỮ TIÊU CHUẨN ==="
-    chon_o_dia || return 1
-    local MOUNT_DIR="/root/Desktop/DiskLocal"
-    
-    echo "CẢNH BÁO: Mọi dữ liệu trên $DISK sẽ bị XÓA."
+    local disk=$(chon_o_dia)
+    [ -z "$disk" ] && return 1
+
+    msg_info "CHẾ ĐỘ AN TOÀN: Giữ nguyên dữ liệu cũ, chỉ tạo thêm phân vùng trên không gian trống."
     read -r -p "Tiếp tục? (y/N): " ok
-    [ "$ok" != "y" ] && [ "$ok" != "Y" ] && { echo "Đã hủy."; return 0; }
+    [[ "$ok" != [yY]* ]] && return 0
 
-    # 1. Thiết lập dung lượng
-    echo "--> CẤU HÌNH DUNG LƯỢNG:"
-    read -r -p "Nhập dung lượng (vd: +10G, +500M) hoặc nhấn Enter để dùng toàn bộ ổ đĩa: " PART_SIZE
+    read -r -p "Nhập dung lượng (vd: +10G) hoặc Enter để dùng toàn bộ: " part_size
+    echo "1. ext4 (Khuyến nghị) | 2. xfs | 3. ext3"
+    read -r -p "Chọn định dạng [1-3]: " fs_choice
 
-    # 2. Chọn định dạng
-    echo "--> CHỌN LOẠI ĐỊNH DẠNG:"
-    echo "  1. ext4 (Khuyến nghị)"
-    echo "  2. xfs"
-    echo "  3. ext3"
-    read -r -p "Chọn [1-3]: " fs_choice
-
-    echo "--> Đang tạo phân vùng Primary dung lượng ${PART_SIZE:-TOÀN BỘ} trên $DISK"
-    printf "o\nn\np\n1\n\n%s\nw\n" "$PART_SIZE" | fdisk "$DISK" >/dev/null 2>&1
-    partprobe "$DISK" 2>/dev/null
-    sleep 2
-
-    # KIỂM TRA: Phân vùng có thực sự được tạo ra không?
-    if [ ! -b "${DISK}1" ]; then
-        echo "=> [LỖI] Không thể tạo phân vùng ${DISK}1 (có thể do nhập sai dung lượng). Đã dừng lại!"
-        return 1
+    local old_parts=$(lsblk -nr -o NAME "$disk")
+    msg_info "Đang phân vùng mới trên $disk..."
+    
+    # Bỏ lệnh 'o', dùng 'n' để giữ nguyên Partition Table hiện tại
+    if [ -z "$part_size" ]; then
+        printf "n\np\n\n\n\nw\n" | fdisk "$disk" >/dev/null 2>&1
+    else
+        printf "n\np\n\n\n%s\nw\n" "${part_size}" | fdisk "$disk" >/dev/null 2>&1
     fi
+    partprobe "$disk" 2>/dev/null; sleep 2
 
-    local FS_TYPE
-    case "$fs_choice" in
-        2) FS_TYPE="xfs" ;;
-        3) FS_TYPE="ext3" ;;
-        *) FS_TYPE="ext4" ;;
-    esac
+    # Tìm phân vùng vừa mới sinh ra
+    local new_part=""
+    for p in $(lsblk -nr -o NAME "$disk"); do
+        ! echo "$old_parts" | grep -q "^$p$" && new_part="/dev/$p" && break
+    done
 
-    echo "--> Format $FS_TYPE cho ${DISK}1"
-    # KIỂM TRA: Lệnh format
-    mkfs -t "$FS_TYPE" "${DISK}1" || { echo "=> [LỖI] Quá trình Format thất bại!"; return 1; }
+    [ -z "$new_part" ] && { msg_err "Lỗi tạo phân vùng (hết dung lượng trống)."; return 1; }
+    msg_ok "Đã tạo thành công: $new_part"
 
-    # KIỂM TRA: Lệnh tạo thư mục và mount
-    mkdir -p "$MOUNT_DIR" || { echo "=> [LỖI] Không thể tạo thư mục $MOUNT_DIR"; return 1; }
-    mount "${DISK}1" "$MOUNT_DIR" || { echo "=> [LỖI] Không thể gắn kết (Mount) phân vùng vào thư mục!"; return 1; }
+    read -r -p "Bạn có muốn ép buộc định dạng (Force Format - xóa sạch tàn dư hệ tập tin cũ)? (y/N): " force_cfm
+    local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
+    local force_flag=""
+    [[ "$force_cfm" == [yY]* ]] && force_flag="${fs_cfg[1]}"
 
-    echo "[OK] Đã gắn kết ${DISK}1 vào $MOUNT_DIR."
-    echo "=> Ổ đĩa đã sẵn sàng để sử dụng hoặc chia sẻ qua Chức năng 3."
+    # Mount động theo tên phân vùng
+    format_and_mount "$new_part" "${fs_cfg[0]}" "$force_flag" "/root/Desktop/DiskLocal_$(basename "$new_part")"
 }
 
 # ==========================================================
-# 2. HÀM LVM (Chuẩn bị nguyên liệu, Tạo ổ ảo, Format & Mount)
+# MODULE 3: LVM (Logical Volume Manager - New & Extend)
 # ==========================================================
+prepare_lvm_disk() {
+    local dev=$1
+    if [ -b "$dev" ] && ! is_os_disk "$dev"; then
+        msg_info "Đang chuẩn bị phân vùng type 8e cho $dev..."
+        printf "o\nn\np\n1\n\n\nt\n8e\nw\n" | fdisk "$dev" >/dev/null 2>&1
+        partprobe "$dev" 2>/dev/null; sleep 1
+        [ -b "${dev}1" ] && echo "${dev}1"
+    fi
+}
+
 setup_lvm() {
-    echo "=== QUẢN LÝ Ổ ĐĨA ẢO LVM ==="
-    echo " 1. Bước 1: Chuẩn bị đĩa thô (Tạo phân vùng LVM - type 8e)"
-    echo " 2. Bước 2: Khởi tạo LVM (Tạo VG, LV, Format & Tự động Mount)"
-    read -r -p "Chọn thao tác [1-2]: " lvm_step
+    echo -e "\n=== QUẢN LÝ Ổ ĐĨA ẢO LVM ==="
+    echo " 1. Khởi tạo LVM mới (Gộp ổ đĩa trống thành 1 LVM)"
+    echo " 2. Mở rộng LVM an toàn (Giữ nguyên dữ liệu hiện tại)"
+    read -r -p "Chọn chức năng [1-2]: " mode
 
-    if [ "$lvm_step" == "1" ]; then
-        chon_o_dia || return 1
-        echo "--> CẤU HÌNH DUNG LƯỢNG CHO PHÂN VÙNG LVM:"
-        read -r -p "Nhập dung lượng (vd: +10G, +500M) hoặc nhấn Enter để dùng toàn bộ: " PART_SIZE
+    if [ "$mode" == "1" ]; then
+        msg_info "KHỞI TẠO LVM MỚI"
+        local disks_avail=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk" && $1!="sr0" && !/loop/ {print $1}')
+        for d in $disks_avail; do
+            ! is_os_disk "/dev/$d" && echo "  - $d ($(lsblk -dn -o SIZE "/dev/$d"))"
+        done
         
-        echo "CẢNH BÁO: Mọi dữ liệu trên $DISK sẽ bị XÓA."
-        read -r -p "Tiếp tục? (y/N): " ok
-        [ "$ok" != "y" ] && [ "$ok" != "Y" ] && { echo "Đã hủy."; return 0; }
+        read -r -p "Nhập tên các ổ gốc để gộp (vd: sdb sdc): " -a disks
+        [ ${#disks[@]} -eq 0 ] && return 1
 
-        echo "--> Đang tạo phân vùng Extended và Logical (type 8e) dung lượng ${PART_SIZE:-TOÀN BỘ} trên $DISK"
-        printf "o\nn\ne\n1\n\n%s\nn\nl\n\n\nt\n5\n8e\nw\n" "$PART_SIZE" | fdisk "$DISK" >/dev/null 2>&1
-        partprobe "$DISK" 2>/dev/null
-        sleep 2
-        
-        # KIỂM TRA: Phân vùng ảo 8e có được tạo không?
-        if [ ! -b "${DISK}5" ]; then
-            echo "=> [LỖI] Không thể tạo phân vùng LVM ${DISK}5. Vui lòng kiểm tra lại!"
-            return 1
-        fi
-        
-        echo "[OK] Phân vùng ${DISK}5 (type 8e) đã được tạo thành công."
-        echo "=> Hãy tiếp tục chọn lại Chức năng 2 (Bước 2) để gộp phân vùng này vào hệ thống LVM."
-        return 0
-        
-    elif [ "$lvm_step" == "2" ]; then
-        local -a DEVICES
-        local DEV VG_NAME LV_NAME CONFIRM FS_TYPE
-        local MOUNT_DIR="/root/Desktop/DiskLVM"
-        
-        echo "=== KHỞI TẠO VÀ GẮN KẾT LVM ==="
-        echo "--> Danh sách các thiết bị/phân vùng KHẢ DỤNG (Gồm cả các phân vùng 8e vừa tạo):"
-        echo -e "THIẾT BỊ\tLOẠI\t\tKÍCH THƯỚC"
-        
-        # Quét lấy ổ đĩa hoặc phân vùng thô chưa bị mount
-        lsblk -l -o NAME,TYPE,SIZE,MOUNTPOINT | awk '$4 == "" && ($2 == "disk" || $2 == "part") {printf "/dev/%-15s %-15s %s\n", $1, $2, $3}'
-        echo "--------------------------------------------------------"
-        
-        read -r -p "Nhập thiết bị từ bảng trên (cách nhau bằng khoảng trắng, vd: /dev/sdb5 /dev/sdc): " -a DEVICES
-        
-        [ "${#DEVICES[@]}" -eq 0 ] && { echo "=> LỖI: Chưa nhập thiết bị nào."; return 1; }
-        
-        for DEV in "${DEVICES[@]}"; do
-            if [ ! -b "$DEV" ]; then
-                echo "=> LỖI: Thiết bị $DEV không tồn tại."
-                return 1
-            fi
-            if lsblk -nr -o MOUNTPOINT "$DEV" | grep -q '[^[:space:]]'; then
-                echo "=> LỖI: Thiết bị $DEV đang được mount! Không thể dùng."
-                return 1
-            fi
+        local lvm_parts=()
+        for d in "${disks[@]}"; do
+            local p=$(prepare_lvm_disk "/dev/${d#/dev/}")
+            [ -n "$p" ] && lvm_parts+=("$p")
         done
 
-        read -r -p "Tên Volume Group [VolumeA]: " VG_NAME
-        VG_NAME="${VG_NAME:-VolumeA}"
-        read -r -p "Tên Logical Volume [LV]: " LV_NAME
-        LV_NAME="${LV_NAME:-LV}"
+        [ ${#lvm_parts[@]} -eq 0 ] && { msg_err "Không có phân vùng hợp lệ."; return 1; }
 
-        read -r -p "Tạo LVM ($VG_NAME/$LV_NAME) bằng các thiết bị trên? (y/N): " CONFIRM
-        [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && return 0
+        read -r -p "Tên VG [VolumeA]: " vg; vg="${vg:-VolumeA}"
+        read -r -p "Tên LV [LV]: " lv; lv="${lv:-LV}"
 
-        echo "--> Đang khởi tạo LVM..."
-        pvcreate "${DEVICES[@]}" || { echo "=> [LỖI] pvcreate thất bại!"; return 1; }
-        vgcreate "$VG_NAME" "${DEVICES[@]}" || { echo "=> [LỖI] vgcreate thất bại!"; return 1; }
-        lvcreate -l 100%FREE -n "$LV_NAME" "$VG_NAME" || { echo "=> [LỖI] lvcreate thất bại!"; return 1; }
+        msg_info "Đang khởi tạo cấu trúc LVM..."
+        pvcreate "${lvm_parts[@]}" && vgcreate "$vg" "${lvm_parts[@]}" && lvcreate -l 100%FREE -n "$lv" "$vg" || return 1
 
-        local LV_TARGET="/dev/$VG_NAME/$LV_NAME"
-        
-        echo "Chọn hệ tập tin để format LVM:"
-        echo "  1. ext4 (Khuyến nghị) | 2. xfs | 3. ext3"
-        read -r -p "Chọn định dạng [1]: " fs_choice_lvm
-        
-        case "$fs_choice_lvm" in
-            2) FS_TYPE="xfs" ;;
-            3) FS_TYPE="ext3" ;;
-            *) FS_TYPE="ext4" ;;
-        esac
+        echo "1. ext4 | 2. xfs | 3. ext3"
+        read -r -p "Định dạng cho LVM [1-3]: " fs_choice
+        local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
 
-        echo "--> Định dạng $FS_TYPE cho $LV_TARGET..."
-        mkfs -t "$FS_TYPE" "$LV_TARGET" || { echo "=> [LỖI] Format ổ ảo LVM thất bại!"; return 1; }
+        format_and_mount "/dev/$vg/$lv" "${fs_cfg[0]}" "${fs_cfg[1]}" "/root/Desktop/DiskLVM_${vg}_${lv}"
+
+    elif [ "$mode" == "2" ]; then
+        msg_info "MỞ RỘNG LVM AN TOÀN"
+        vgs 2>/dev/null || { msg_err "Không tìm thấy Volume Group nào."; return 1; }
         
-        mkdir -p "$MOUNT_DIR" || { echo "=> [LỖI] Không thể tạo thư mục $MOUNT_DIR"; return 1; }
-        mount "$LV_TARGET" "$MOUNT_DIR" || { echo "=> [LỖI] Không thể gắn kết (Mount) LVM!"; return 1; }
-        
-        echo "[OK] Ổ ảo LVM $LV_TARGET đã được mount tại $MOUNT_DIR."
-        echo "=> Sẵn sàng sử dụng hoặc dùng Chức năng 3 để cấu hình File Server."
-    else
-        echo "Lựa chọn không hợp lệ."
-        return 1
+        read -r -p "Nhập tên VG muốn mở rộng: " t_vg
+        lvs "$t_vg" 2>/dev/null && read -r -p "Nhập tên LV muốn mở rộng: " t_lv
+        local lv_path="/dev/$t_vg/$t_lv"
+        [ ! -b "$lv_path" ] && { msg_err "LV $lv_path không tồn tại."; return 1; }
+
+        read -r -p "Nhập các ổ đĩa MỚI muốn thêm vào LVM (vd: sdc sdd): " -a disks
+        local new_parts=()
+        for d in "${disks[@]}"; do
+            local p=$(prepare_lvm_disk "/dev/${d#/dev/}")
+            [ -n "$p" ] && new_parts+=("$p")
+        done
+
+        [ ${#new_parts[@]} -eq 0 ] && return 1
+
+        msg_info "Đang bổ sung dung lượng..."
+        pvcreate "${new_parts[@]}" && vgextend "$t_vg" "${new_parts[@]}" && lvextend -l +100%FREE "$lv_path" || return 1
+
+        msg_info "Đang ép giãn hệ tập tin (Resize FS)..."
+        local cur_fs=$(blkid -s TYPE -o value "$lv_path")
+        if [ "$cur_fs" == "xfs" ]; then
+            local mnt=$(findmnt -no TARGET "$lv_path")
+            if [ -n "$mnt" ]; then 
+                xfs_growfs "$mnt"
+            else
+                mkdir -p /mnt/tmp_resize && mount "$lv_path" /mnt/tmp_resize
+                xfs_growfs /mnt/tmp_resize && umount /mnt/tmp_resize && rm -rf /mnt/tmp_resize
+            fi
+        else
+            resize2fs "$lv_path"
+        fi
+        msg_ok "Mở rộng thành công: $lv_path"
     fi
 }
 
 # ==========================================================
-# 3. HÀM SHARE DISK (Quét Mount, Tạo Thư Mục Con, Share Anonymous)
+# MODULE 4: USER & QUOTA (Quản trị Người dùng & Hạn ngạch)
 # ==========================================================
-setup_anonymous_samba_quota() {
-    local MOUNT_DIR SHARE_DIR SHARE_PATH TARGET_DEV CURRENT_FS QUOTA_MB
-    local SMB_CONF="/etc/samba/smb.conf" 
+chon_user_he_thong() {
+    msg_info "LỰA CHỌN TÀI KHOẢN ĐÍCH"
+    local user_list=$(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' /etc/passwd)
     
-    echo "=== QUÉT VÀ CẤU HÌNH CHIA SẺ FILE SERVER ==="
-    
-    # 1. Quét các ổ đĩa đã mount sẵn trên hệ thống
-    echo "--> Danh sách các ổ đĩa đã được gắn kết (Mount) hợp lệ:"
-    echo -e "THIẾT BỊ\t\tHỆ TẬP TIN\tTHƯ MỤC GỐC (MOUNT POINT)"
-    df -h -T | grep -E 'ext3|ext4|xfs' | awk '{printf "%-20s %-15s %s\n", $1, $2, $7}'
-    echo "--------------------------------------------------------"
+    echo "-----------------------------------------------------------------"
+    echo "[Tài khoản Ẩn danh / Anonymous mặc định]"
+    echo "  - nobody (Dùng cho khách vãng lai, truy cập tự do)"
+    echo -e "\n[Các tài khoản định danh hiện có (UID >= 1000)]"
+    [ -z "$user_list" ] && echo "  (Hệ thống chưa có user thông thường nào)" || echo "$user_list" | column | sed 's/^/  /'
+    echo "-----------------------------------------------------------------"
 
-    read -r -p "Nhập THƯ MỤC GỐC từ bảng trên (vd: /root/Desktop/DiskLocal): " MOUNT_DIR
+    read -r -p "Nhập tên người dùng từ danh sách trên (vd: nobody): " selected_user
     
-    if ! mountpoint -q "$MOUNT_DIR"; then
-        echo "=> LỖI: $MOUNT_DIR chưa được mount! Hãy dùng Chức năng 1 hoặc 2 để khởi tạo ổ đĩa."
+    if ! id "$selected_user" &>/dev/null; then
+        msg_err "Tài khoản '$selected_user' KHÔNG TỒN TẠI!"
+        msg_warn "Chính sách hệ thống: Không tự sinh user rác. Vui lòng chọn user có sẵn."
         return 1
     fi
 
-    read -r -p "Nhập tên Thư mục con muốn TẠO để chia sẻ mạng (vd: PublicData): " SHARE_DIR
-    read -r -p "Nhập giới hạn Quota (MB) cho toàn bộ ổ đĩa: " QUOTA_MB
+    TARGET_USER="$selected_user"
+    msg_ok "Đã chốt tài khoản: $TARGET_USER"
+    return 0
+}
 
-    if [ -z "$SHARE_DIR" ] || [[ "$SHARE_DIR" == *" "* ]]; then
-        echo "=> LỖI: Tên thư mục chia sẻ không được để trống và không chứa khoảng trắng!"
-        return 1
-    fi
-
-    TARGET_DEV=$(df "$MOUNT_DIR" | tail -1 | awk '{print $1}')
-    CURRENT_FS=$(df -T "$MOUNT_DIR" | tail -1 | awk '{print $2}')
-
-    # 2. Tạo thư mục con & Phân quyền Anonymous
-    SHARE_PATH="$MOUNT_DIR/$SHARE_DIR"
-    echo "--> Đang tạo và phân quyền cho không gian chia sẻ: $SHARE_PATH"
+cauhinh_quota() {
+    msg_info "CẤU HÌNH HẠN NGẠCH LƯU TRỮ (QUOTA NÂNG CAO)"
+    df -hT | grep -E 'ext3|ext4|xfs' | awk '{printf "%-20s %-15s %s\n", $1, $2, $7}'
     
-    # KIỂM TRA: Tạo thư mục chia sẻ
-    mkdir -p "$SHARE_PATH" || { echo "=> [LỖI] Không thể tạo thư mục chia sẻ!"; return 1; }
-    chmod -R 777 "$SHARE_PATH" || { echo "=> [LỖI] Lỗi khi cấp quyền 777 cho thư mục!"; return 1; }
-    chcon -Rt samba_share_t "$SHARE_PATH" 2>/dev/null
+    read -r -p "Nhập thư mục gốc (MOUNT POINT) cần áp dụng Quota: " mnt_dir
+    mountpoint -q "$mnt_dir" || { msg_err "Thư mục chưa được mount."; return 1; }
 
-    # 3. Cập nhật Quota trên ổ đĩa đã mount
-    echo "--> Đang áp dụng Quota..."
+    local dev=$(df "$mnt_dir" | tail -1 | awk '{print $1}')
+    local fs=$(df -T "$mnt_dir" | tail -1 | awk '{print $2}')
+
+    [ "$fs" == "xfs" ] && { msg_warn "Hệ XFS cần dùng xfs_quota thủ công."; return 1; }
+
+    chon_user_he_thong || return 1
+
+    msg_info "Đang kích hoạt môi trường Quota..."
     yum install -y quota &>/dev/null
-    id "$TEST_USER" &>/dev/null || useradd "$TEST_USER"
-
-    sed -i "\|[[:space:]]$MOUNT_DIR[[:space:]]|d" /etc/fstab
-    echo "$TARGET_DEV $MOUNT_DIR $CURRENT_FS defaults,usrquota,grpquota 0 0" >> /etc/fstab
     
-    # Cảnh báo nếu không thể remount thay vì dừng hẳn script
-    mount -o remount,usrquota,grpquota "$MOUNT_DIR" || echo "=> [CẢNH BÁO] Không thể remount ổ đĩa để ép Quota. Tiếp tục cấu hình Samba..."
+    sed -i "\|[[:space:]]$mnt_dir[[:space:]]|d" /etc/fstab
+    echo "$dev $mnt_dir $fs defaults,usrquota,grpquota 0 0" >> /etc/fstab
+    mount -o remount,usrquota,grpquota "$mnt_dir" 2>/dev/null
+    
+    quotacheck -cugm "$mnt_dir" 2>/dev/null
+    quotaon -v "$mnt_dir" 2>/dev/null
 
-    if [[ "$CURRENT_FS" != "xfs" ]]; then
-        quotacheck -cugm "$MOUNT_DIR" 2>/dev/null
-        quotaon -v "$MOUNT_DIR" 2>/dev/null
-        
-        # Tự động quy đổi MB sang KB và thiết lập Hard Limit
-        local QUOTA_KB=$((QUOTA_MB * 1024))
-        local QUOTA_HARD=$((QUOTA_KB + 51200)) 
-        setquota -u "$TEST_USER" "$QUOTA_KB" "$QUOTA_HARD" 0 0 "$MOUNT_DIR" 2>/dev/null
-    else
-        echo "(Hệ tập tin XFS: Bỏ qua quotacheck, cần dùng xfs_quota thủ công)"
+    echo -e "\n--- THIẾT LẬP DUNG LƯỢNG (MB) ---"
+    read -r -p "Soft Limit (Cảnh báo) [Enter = Vô hạn]: " block_soft_mb
+    read -r -p "Hard Limit (Chặn cứng) [Enter = Vô hạn]: " block_hard_mb
+    
+    echo -e "\n--- THIẾT LẬP SỐ LƯỢNG FILE (INODES) ---"
+    read -r -p "Soft Limit Inodes [Enter = Vô hạn]: " inode_soft
+    read -r -p "Hard Limit Inodes [Enter = Vô hạn]: " inode_hard
+
+    local b_soft=$(( ${block_soft_mb:-0} * 1024 ))
+    local b_hard=$(( ${block_hard_mb:-0} * 1024 ))
+    local i_soft=${inode_soft:-0}
+    local i_hard=${inode_hard:-0}
+
+    msg_info "Đang áp dụng Hạn ngạch cho '$TARGET_USER'..."
+    setquota -u "$TARGET_USER" "$b_soft" "$b_hard" "$i_soft" "$i_hard" "$mnt_dir" 2>/dev/null
+
+    read -r -p "Bật thời gian ân hạn 7 ngày cho cảnh báo Soft Limit? (y/N): " set_grace
+    if [[ "$set_grace" == [yY]* ]]; then
+        setquota -t 604800 604800 "$mnt_dir" 2>/dev/null
+        msg_ok "Đã cấu hình Grace Period (7 ngày)."
     fi
 
-    # 4. Ghi cấu hình Samba Anonymous
-    echo "--> Đang cấu hình dịch vụ Samba (Quyền Anonymous)..."
+    msg_ok "BÁO CÁO QUOTA HIỆN TẠI:"
+    repquota -as | grep -E "User|$TARGET_USER"
+}
+
+# ==========================================================
+# MODULE 5: FILE SERVER (Samba Share thông minh)
+# ==========================================================
+cauhinh_samba() {
+    msg_info "CẤU HÌNH CHIA SẺ MẠNG (SAMBA SERVER)"
+    df -hT | grep -E 'ext3|ext4|xfs' | awk '{printf "%-20s %-15s %s\n", $1, $2, $7}'
+    
+    read -r -p "Nhập thư mục gốc (MOUNT POINT) chứa thư mục chia sẻ: " mnt_dir
+    mountpoint -q "$mnt_dir" || { msg_err "Thư mục chưa được mount."; return 1; }
+
+    msg_info "QUÉT THƯ MỤC CÓ SẴN TRONG $mnt_dir"
+    local existing_dirs=$(find "$mnt_dir" -maxdepth 1 -mindepth 1 -type d ! -name "lost+found" -exec basename {} \;)
+    
+    echo "-----------------------------------------------------------------"
+    [ -z "$existing_dirs" ] && echo "  (Chưa có thư mục con nào)" || echo "$existing_dirs" | column | sed 's/^/  - /'
+    echo "-----------------------------------------------------------------"
+
+    read -r -p "Nhập tên thư mục muốn Share (Chọn ở trên hoặc gõ tên Mới): " share_dir
+    [ -z "$share_dir" ] && return 1
+    
+    local share_path="$mnt_dir/$share_dir"
+
+    if [ -d "$share_path" ]; then
+        msg_ok "Sử dụng thư mục hiện có: $share_path"
+    else
+        msg_info "Tạo mới thư mục: $share_path"
+        mkdir -p "$share_path" || return 1
+    fi
+
+    msg_info "THIẾT LẬP TÀI KHOẢN ĐẠI DIỆN"
+    chon_user_he_thong || return 1
+
+    msg_info "Cấp quyền sở hữu ($TARGET_USER) và SELinux..."
+    chmod -R 777 "$share_path" && chcon -Rt samba_share_t "$share_path" 2>/dev/null
+    chown -R "$TARGET_USER" "$share_path"
+
+    msg_info "Cấu hình dịch vụ Samba..."
     yum install -y samba samba-client samba-common &>/dev/null
+    chmod o+x /root /root/Desktop "$mnt_dir" 2>/dev/null
     
-    # Mở quyền cho thư mục cha để Samba truy cập xuyên qua
-    chmod o+x /root 2>/dev/null
-    [ -d /root/Desktop ] && chmod o+x /root/Desktop
-    chmod o+x "$MOUNT_DIR" 2>/dev/null
-
-    cp -n "$SMB_CONF" "${SMB_CONF}.bak"
-    grep -q "map to guest" "$SMB_CONF" || sed -i '/^\[global\]/a\        map to guest = Bad User\n        security = user' "$SMB_CONF"
-
-    # Xóa block cấu hình cũ nếu trùng tên
-    sed -i "/^\[$SHARE_DIR\]/,/^# END $SHARE_DIR/d" "$SMB_CONF"
+    local smb_conf="/etc/samba/smb.conf"
+    cp -n "$smb_conf" "${smb_conf}.bak"
+    grep -q "map to guest" "$smb_conf" || sed -i '/^\[global\]/a\        map to guest = Bad User\n        security = user' "$smb_conf"
     
-    cat >> "$SMB_CONF" <<EOF
-[$SHARE_DIR]
-# BEGIN $SHARE_DIR
-  path = $SHARE_PATH
+    sed -i "/^\[$share_dir\]/,/^# END $share_dir/d" "$smb_conf"
+    
+    cat >> "$smb_conf" <<EOF
+[$share_dir]
+# BEGIN $share_dir
+  path = $share_path
   browsable = yes
   writable = yes
-  public = yes
   guest ok = yes
-  guest only = yes
-  read only = no
-  force user = $TEST_USER
+  force user = $TARGET_USER
   create mask = 0666
   directory mask = 0777
-# END $SHARE_DIR
+# END $share_dir
 EOF
 
     setsebool -P samba_export_all_rw on 2>/dev/null
-    if systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-service=samba &>/dev/null
-        firewall-cmd --reload &>/dev/null
-    fi
-
     systemctl enable smb nmb &>/dev/null
+    systemctl restart smb nmb || { msg_err "Lỗi Restart Samba"; return 1; }
     
-    # KIỂM TRA: Khởi động lại dịch vụ Samba
-    systemctl restart smb nmb || { echo "=> [LỖI] Không thể khởi động dịch vụ Samba!"; return 1; }
-    
-    echo "[OK] Chia sẻ thành công! Truy cập không cần mật khẩu qua: \\\\<IP>\\$SHARE_DIR"
+    msg_ok "CHIA SẺ THÀNH CÔNG! Truy cập từ Windows/LAN qua: \\\\<IP>\\$share_dir"
 }
 
 # ==========================================================
-# MENU CHÍNH
+# MODULE 6: ROUTER (Menu điều hướng chính)
 # ==========================================================
 while true; do
-    echo
+    echo -e "\n=========================================================="
+    echo "    HỆ THỐNG QUẢN LÝ LƯU TRỮ TRUNG TÂM (CENTOS)"
     echo "=========================================================="
-    echo "    QUẢN LÝ LƯU TRỮ VÀ SHARE DISK (BẢN HOÀN THIỆN)"
-    echo "=========================================================="
-    echo " 1. Partition (Tạo đĩa cứng & Tự động Mount)"
-    echo " 2. Setup LVM (Tạo ổ ảo & Tự động Mount)"
-    echo " 3. Setup Samba (Quét ổ đĩa, tạo thư mục con & Chia sẻ)"
-    echo " 0. Thoát"
-    echo "=========================================================="
-    read -r -p "Chọn chức năng (0-3): " c
+    echo " 1. Phân vùng đĩa cứng (Partition an toàn & Mount)"
+    echo " 2. Quản lý Ổ đĩa ảo (Khởi tạo mới hoặc Mở rộng LVM)"
+    echo " 3. Quản trị Hạn ngạch (Quota Blocks & Inodes)"
+    echo " 4. Chia sẻ mạng thư mục"
+    echo " 0. Thoát hệ thống"
+    read -r -p "Chọn chức năng [0-4]: " c
     case $c in
         1) chay_chuc_nang_partition ;;
         2) setup_lvm ;;
-        3) setup_anonymous_samba_quota ;;
-        0) echo "Tạm biệt!"; exit 0 ;;
-        *) echo "Lựa chọn không hợp lệ." ;;
+        3) cauhinh_quota ;;
+        4) cauhinh_samba ;;
+        0) msg_ok "Hệ thống thoát an toàn. Tạm biệt!"; exit 0 ;;
+        *) msg_warn "Lựa chọn không hợp lệ." ;;
     esac
 done
