@@ -462,11 +462,22 @@ chon_user_he_thong() {
 
 cauhinh_quota() {
     msg_info "CẤU HÌNH HẠN NGẠCH LƯU TRỮ (QUOTA NÂNG CAO)"
-    df -PhT | grep -E 'ext3|ext4|xfs' | awk '{printf "%-30s %-10s %s\n", $1, $2, $7}'
     
-    read -r -p "Nhập thư mục gốc (MOUNT POINT) cần áp dụng Quota (hoặc Enter để hủy): " mnt_dir
+    # Lọc thông minh: Chỉ hiển thị các phân vùng dữ liệu, ẩn phân vùng lõi OS
+    msg_info "DANH SÁCH CÁC PHÂN VÙNG DỮ LIỆU SẴN SÀNG:"
+    local valid_mounts=$(df -PhT | grep -E 'ext3|ext4|xfs' | awk '$7 !~ /^(\/|\/boot)$/')
+    
+    if [ -z "$valid_mounts" ]; then
+        msg_warn "Chưa có ổ đĩa dữ liệu nào được gắn kết. Hãy dùng chức năng 1 hoặc 2 trước!"
+        return 1
+    fi
+    
+    echo "$valid_mounts" | awk '{printf "  => %-20s | FS: %-5s | MOUNT POINT: %s\n", $1, $2, $7}'
+    echo "-----------------------------------------------------------------"
+    
+    read -r -p "Nhập chính xác MOUNT POINT từ danh sách trên (hoặc Enter để hủy): " mnt_dir
     [ -z "$mnt_dir" ] && return 1
-    mountpoint -q "$mnt_dir" || { msg_err "Thư mục chưa được mount."; return 1; }
+    mountpoint -q "$mnt_dir" || { msg_err "Đường dẫn không hợp lệ hoặc chưa được mount."; return 1; }
 
     local dev=$(df -P "$mnt_dir" | tail -1 | awk '{print $1}')
     local fs=$(df -PT "$mnt_dir" | tail -1 | awk '{print $2}')
@@ -485,7 +496,6 @@ cauhinh_quota() {
     mount -o remount,usrquota,grpquota "$mnt_dir" 2>/dev/null
     
     msg_info "Đang quét và đồng bộ tệp tin Quota..."
-    # Khắc phục 1: Chỉ tạo mới (-c) nếu chưa có tệp quota, ngược lại chỉ cập nhật (-u, -g)
     if [ ! -f "$mnt_dir/aquota.user" ]; then
         quotacheck -cugmf "$mnt_dir" 2>/dev/null
     else
@@ -516,7 +526,6 @@ cauhinh_quota() {
     fi
 
     msg_ok "BÁO CÁO QUOTA TOÀN BỘ TRÊN '$mnt_dir':"
-    # Khắc phục 2: Bỏ bộ lọc grep để hiển thị toàn bộ người dùng đang có dữ liệu/quota trên ổ đĩa
     repquota -s "$mnt_dir" 2>/dev/null
 }
 
