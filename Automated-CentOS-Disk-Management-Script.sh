@@ -365,6 +365,23 @@ setup_lvm() {
         local lv_path="/dev/$t_vg/$t_lv"
         [ ! -b "$lv_path" ] && { msg_err "LV '$lv_path' không tồn tại. Đã hủy."; return 1; }
 
+        # --- BẮT ĐẦU ĐOẠN MÃ THÊM MỚI ---
+        msg_info "DANH SÁCH Ổ ĐĨA KHẢ DỤNG ĐỂ MỞ RỘNG:"
+        local disks_avail=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk" && $1!="sr0" && !/loop/ {print $1}')
+        local has_lvm_disk=0
+        for d in $disks_avail; do
+            local dev="/dev/$d"
+            is_os_disk "$dev" && continue
+            local free_mb=$(get_lvm_free_mb "$dev")
+            free_mb=${free_mb:-0}
+            if [ "$free_mb" -ge 10 ]; then
+                has_lvm_disk=1
+                echo "  - $d | Trống khả dụng: $(format_gb "$free_mb") (${free_mb} MiB)"
+            fi
+        done
+        [ "$has_lvm_disk" -eq 0 ] && { msg_warn "Không có ổ đĩa mới nào khả dụng để mở rộng. Đã hủy."; return 1; }
+        # --- KẾT THÚC ĐOẠN MÃ THÊM MỚI ---
+
         read -r -p "Nhập các ổ đĩa MỚI muốn thêm vào LVM (vd: sdc sdd): " -a disks
         [ ${#disks[@]} -eq 0 ] && { msg_warn "Đã hủy thao tác."; return 1; }
 
