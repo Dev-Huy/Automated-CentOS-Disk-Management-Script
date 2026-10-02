@@ -464,15 +464,16 @@ cauhinh_quota() {
     msg_info "CẤU HÌNH HẠN NGẠCH LƯU TRỮ (QUOTA NÂNG CAO)"
     
     # Lọc thông minh: Chỉ hiển thị các phân vùng dữ liệu, ẩn phân vùng lõi OS
-    msg_info "DANH SÁCH CÁC PHÂN VÙNG DỮ LIỆU SẴN SÀNG:"
-    local valid_mounts=$(df -PhT | grep -E 'ext3|ext4|xfs' | awk '$7 !~ /^(\/|\/boot)$/')
+    msg_info "DANH SÁCH TOÀN BỘ CÁC PHÂN VÙNG ĐANG MOUNT TRÊN MÁY:"
+    # Tạm thời gỡ bỏ grep -E 'ext3|ext4|xfs' để xem CentOS thực sự đang báo cáo hệ tập tin là gì
+    local valid_mounts=$(df -PhT | awk 'NR>1 && $7 !~ /^(\/|\/boot)$/ {printf "  => Thiết bị: %-25s | Phân loại: %-8s | Mount tại: %s\n", $1, $2, $7}')
     
     if [ -z "$valid_mounts" ]; then
-        msg_warn "Chưa có ổ đĩa dữ liệu nào được gắn kết. Hãy dùng chức năng 1 hoặc 2 trước!"
+        msg_warn "Hệ thống báo cáo không có ổ đĩa nào ngoài hệ điều hành đang được mount."
         return 1
     fi
     
-    echo "$valid_mounts" | awk '{printf "  => %-20s | FS: %-5s | MOUNT POINT: %s\n", $1, $2, $7}'
+    echo "$valid_mounts"
     echo "-----------------------------------------------------------------"
     
     read -r -p "Nhập chính xác MOUNT POINT từ danh sách trên (hoặc Enter để hủy): " mnt_dir
