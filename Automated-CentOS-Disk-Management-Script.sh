@@ -417,9 +417,14 @@ cauhinh_quota() {
     
     sed -i "\|[[:space:]]$mnt_dir[[:space:]]|d" /etc/fstab
     echo "$dev $mnt_dir $fs defaults,usrquota,grpquota 0 0" >> /etc/fstab
+    
+    # KHẮC PHỤC 1: Tắt quota cũ để tránh kẹt trạng thái
+    quotaoff -v "$mnt_dir" 2>/dev/null
     mount -o remount,usrquota,grpquota "$mnt_dir" 2>/dev/null
     
-    quotacheck -cugm "$mnt_dir" 2>/dev/null
+    msg_info "Đang quét và khởi tạo tệp tin Quota (có thể mất vài giây)..."
+    # KHẮC PHỤC 2: Thêm cờ '-f' (force) để ép quét ngay cả khi ổ đĩa đang chạy
+    quotacheck -cugmf "$mnt_dir" 2>/dev/null
     quotaon -v "$mnt_dir" 2>/dev/null
 
     echo -e "\n--- THIẾT LẬP DUNG LƯỢNG (MB) ---"
@@ -444,8 +449,9 @@ cauhinh_quota() {
         msg_ok "Đã cấu hình Grace Period (7 ngày)."
     fi
 
-    msg_ok "BÁO CÁO QUOTA HIỆN TẠI:"
-    repquota -as | grep -E "User|$TARGET_USER"
+    msg_ok "BÁO CÁO QUOTA HIỆN TẠI CỦA TÀI KHOẢN '$TARGET_USER':"
+    # KHẮC PHỤC 3: Dùng Regex thông minh hơn để giữ lại các đường kẻ khung table
+    repquota -as 2>/dev/null | grep -E "^(User|-|$TARGET_USER)"
 }
 
 # ==========================================================
