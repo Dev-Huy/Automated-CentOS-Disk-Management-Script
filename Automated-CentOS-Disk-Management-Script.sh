@@ -45,7 +45,13 @@ format_and_mount() {
     
     mkdir -p "$mount_dir" || { msg_err "Lỗi tạo thư mục $mount_dir"; return 1; }
     mount "$dev" "$mount_dir" || { msg_err "Lỗi mount $dev"; return 1; }
-    msg_ok "Đã gắn kết $dev vào $mount_dir"
+    
+    # BỔ SUNG: Tự động ghi vào /etc/fstab để giữ ổ đĩa vĩnh viễn sau khi reboot
+    if ! grep -q "[[:space:]]$mount_dir[[:space:]]" /etc/fstab; then
+        echo "$dev $mount_dir $fs_type defaults 0 0" >> /etc/fstab
+    fi
+    
+    msg_ok "Đã gắn kết $dev vào $mount_dir (Đã lưu cấu hình vĩnh viễn)"
 }
 
 chon_o_dia() {
