@@ -259,8 +259,7 @@ prepare_lvm_disk() {
     udevadm settle 2>/dev/null
     sleep 1
 
-    new_part=$(lsblk -nr -o NAME,PARTN "$dev" 2>/dev/null |
-        awk -v n="$part_num" '$2 == n {print "/dev/" $1; exit}')
+    new_part=$(lsblk -nr -o NAME "$dev" 2>/dev/null | grep -E "^$(basename $dev)[0-9]+$" | tail -1 | awk '{print "/dev/" $1}')
 
     [ -b "$new_part" ] || {
         msg_err "Không xác định được partition LVM vừa tạo trên $dev." >&2
