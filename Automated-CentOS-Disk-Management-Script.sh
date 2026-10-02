@@ -462,13 +462,14 @@ chon_user_he_thong() {
 
 cauhinh_quota() {
     msg_info "CẤU HÌNH HẠN NGẠCH LƯU TRỮ (QUOTA NÂNG CAO)"
-    df -hT | grep -E 'ext3|ext4|xfs' | awk '{printf "%-20s %-15s %s\n", $1, $2, $7}'
+    df -PhT | grep -E 'ext3|ext4|xfs' | awk '{printf "%-30s %-10s %s\n", $1, $2, $7}'
     
-    read -r -p "Nhập thư mục gốc (MOUNT POINT) cần áp dụng Quota: " mnt_dir
+    read -r -p "Nhập thư mục gốc (MOUNT POINT) cần áp dụng Quota (hoặc Enter để hủy): " mnt_dir
+    [ -z "$mnt_dir" ] && return 1
     mountpoint -q "$mnt_dir" || { msg_err "Thư mục chưa được mount."; return 1; }
 
-    local dev=$(df "$mnt_dir" | tail -1 | awk '{print $1}')
-    local fs=$(df -T "$mnt_dir" | tail -1 | awk '{print $2}')
+    local dev=$(df -P "$mnt_dir" | tail -1 | awk '{print $1}')
+    local fs=$(df -PT "$mnt_dir" | tail -1 | awk '{print $2}')
 
     [ "$fs" == "xfs" ] && { msg_warn "Hệ XFS cần dùng xfs_quota thủ công."; return 1; }
 
@@ -483,8 +484,13 @@ cauhinh_quota() {
     quotaoff -v "$mnt_dir" 2>/dev/null
     mount -o remount,usrquota,grpquota "$mnt_dir" 2>/dev/null
     
-    msg_info "Đang quét và khởi tạo tệp tin Quota (có thể mất vài giây)..."
-    quotacheck -cugmf "$mnt_dir" 2>/dev/null
+    msg_info "Đang quét và đồng bộ tệp tin Quota..."
+    # Khắc phục 1: Chỉ tạo mới (-c) nếu chưa có tệp quota, ngược lại chỉ cập nhật (-u, -g)
+    if [ ! -f "$mnt_dir/aquota.user" ]; then
+        quotacheck -cugmf "$mnt_dir" 2>/dev/null
+    else
+        quotacheck -ugmf "$mnt_dir" 2>/dev/null
+    fi
     quotaon -v "$mnt_dir" 2>/dev/null
 
     echo -e "\n--- THIẾT LẬP DUNG LƯỢNG (MB) ---"
@@ -509,8 +515,9 @@ cauhinh_quota() {
         msg_ok "Đã cấu hình Grace Period (7 ngày)."
     fi
 
-    msg_ok "BÁO CÁO QUOTA HIỆN TẠI CỦA TÀI KHOẢN '$TARGET_USER':"
-    repquota -as 2>/dev/null | grep -E "^(User|-|$TARGET_USER)"
+    msg_ok "BÁO CÁO QUOTA TOÀN BỘ TRÊN '$mnt_dir':"
+    # Khắc phục 2: Bỏ bộ lọc grep để hiển thị toàn bộ người dùng đang có dữ liệu/quota trên ổ đĩa
+    repquota -s "$mnt_dir" 2>/dev/null
 }
 
 # ==========================================================
