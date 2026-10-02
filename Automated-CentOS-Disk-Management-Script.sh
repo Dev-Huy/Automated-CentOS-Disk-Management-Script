@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SCRIPT QUẢN LÝ LƯU TRỮ VÀ SHARE DISK (BẢN HOÀN THIỆN - AGILE & DECOUPLED)
+# SCRIPT QUẢN LÝ LƯU TRỮ VÀ SHARE DISK (BẢN HOÀN THIỆN TỐI ƯU - CENTOS 7)
 # Kiến trúc: Feature-Sliced Design (Độc lập module, Đơn nhiệm, An toàn dữ liệu)
 # ==============================================================================
 
@@ -115,7 +115,7 @@ chay_chuc_nang_partition() {
     fi
     partprobe "$disk" 2>/dev/null; sleep 2
 
-    # Tìm phân vùng mới tạo (Tương thích CentOS 7)
+    # Tương thích CentOS 7
     local new_part=""
     for p in $(lsblk -nr -o NAME "$disk"); do
         ! echo "$old_parts" | grep -q "^$p$" && new_part="/dev/$p" && break
@@ -147,7 +147,7 @@ get_lvm_free_mb() {
 
     parted -m -s "$dev" unit MiB print free 2>/dev/null |
         awk -F: '
-            $5 ~ /Free Space/ {
+            tolower($5) ~ /free/ {
                 gsub(/MiB/, "", $4)
                 sum += $4
             }
@@ -202,7 +202,7 @@ prepare_lvm_disk() {
             free_size="${free_size//[[:space:]]/}"
             free_type="${free_type//$'\r'/}"
 
-            [ "$free_type" = "Free Space" ] || continue
+            [[ "${free_type,,}" == *"free"* ]] || continue
 
             if awk "BEGIN {exit !($free_size >= 10)}"; then
                 break
@@ -213,7 +213,7 @@ prepare_lvm_disk() {
             free_size=""
         done < <(
             parted -m -s "$dev" unit MiB print free 2>/dev/null |
-            awk -F: '$5 ~ /Free Space/ {
+            awk -F: 'tolower($5) ~ /free/ {
                 gsub(/MiB/, "", $2)
                 gsub(/MiB/, "", $3)
                 gsub(/MiB/, "", $4)
@@ -244,7 +244,7 @@ prepare_lvm_disk() {
     udevadm settle 2>/dev/null
     sleep 1
 
-    # Đã sửa lỗi lsblk tương thích CentOS 7
+    # Tương thích CentOS 7 lsblk
     new_part=$(lsblk -nr -o NAME "$dev" 2>/dev/null | grep -E "^$(basename $dev)[0-9]+$" | tail -1 | awk '{print "/dev/" $1}')
 
     [ -b "$new_part" ] || {
@@ -315,17 +315,22 @@ setup_lvm() {
 
     elif [ "$mode" == "2" ]; then
         msg_info "MỞ RỘNG LVM AN TOÀN"
-        vgs 2>/dev/null || { msg_err "Không tìm thấy VG nào. Quay lại Menu."; return 1; }
+        vgs &>/dev/null || { msg_err "Không tìm thấy Volume Group nào. Quay lại Menu."; return 1; }
+        
+        # HIỂN THỊ VG ĐÃ ĐƯỢC LỌC CỘT TRÁNH NHẦM LẪN
+        msg_info "Danh sách các Volume Group (VG) hiện có:"
+        vgs --noheadings -o vg_name,vg_size,vg_free 2>/dev/null | awk '{print "  - Tên VG: " $1 " | Tổng: " $2 " | Chưa dùng: " $3}'
         
         # --- BƯỚC 1: NHẬP LIỆU VÀ KIỂM TRA ---
         read -r -p "Nhập tên VG muốn mở rộng (hoặc Enter để hủy): " t_vg
         [ -z "$t_vg" ] && { msg_warn "Đã hủy thao tác."; return 1; }
-       vgs "$t_vg" &>/dev/null || { msg_err "VG '$t_vg' không tồn tại. Đã hủy."; return 1; }
+        vgs "$t_vg" &>/dev/null || { msg_err "VG '$t_vg' không tồn tại. Đã hủy."; return 1; }
 
-        msg_info "Danh sách các LV hiện có trong VG '$t_vg':"
-        lvs "$t_vg" 2>/dev/null
+        # HIỂN THỊ LV ĐÃ ĐƯỢC LỌC CỘT (Chỉ giữ lại Tên LV và Dung lượng)
+        msg_info "Danh sách các Phân vùng ảo (LV) nằm trong VG '$t_vg':"
+        lvs --noheadings -o lv_name,lv_size "$t_vg" 2>/dev/null | awk '{print "  - Tên LV: " $1 " | Dung lượng hiện tại: " $2}'
         
-        read -r -p "Nhập chính xác tên LV muốn mở rộng (Xem ở cột LV): " t_lv
+        read -r -p "Nhập chính xác [Tên LV] muốn mở rộng: " t_lv
         [ -z "$t_lv" ] && { msg_warn "Đã hủy thao tác."; return 1; }
         local lv_path="/dev/$t_vg/$t_lv"
         [ ! -b "$lv_path" ] && { msg_err "LV '$lv_path' không tồn tại. Đã hủy."; return 1; }
@@ -418,12 +423,10 @@ cauhinh_quota() {
     sed -i "\|[[:space:]]$mnt_dir[[:space:]]|d" /etc/fstab
     echo "$dev $mnt_dir $fs defaults,usrquota,grpquota 0 0" >> /etc/fstab
     
-    # KHẮC PHỤC 1: Tắt quota cũ để tránh kẹt trạng thái
     quotaoff -v "$mnt_dir" 2>/dev/null
     mount -o remount,usrquota,grpquota "$mnt_dir" 2>/dev/null
     
     msg_info "Đang quét và khởi tạo tệp tin Quota (có thể mất vài giây)..."
-    # KHẮC PHỤC 2: Thêm cờ '-f' (force) để ép quét ngay cả khi ổ đĩa đang chạy
     quotacheck -cugmf "$mnt_dir" 2>/dev/null
     quotaon -v "$mnt_dir" 2>/dev/null
 
@@ -450,7 +453,6 @@ cauhinh_quota() {
     fi
 
     msg_ok "BÁO CÁO QUOTA HIỆN TẠI CỦA TÀI KHOẢN '$TARGET_USER':"
-    # KHẮC PHỤC 3: Dùng Regex thông minh hơn để giữ lại các đường kẻ khung table
     repquota -as 2>/dev/null | grep -E "^(User|-|$TARGET_USER)"
 }
 
