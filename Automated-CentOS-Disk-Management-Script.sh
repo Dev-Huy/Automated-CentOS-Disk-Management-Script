@@ -161,6 +161,7 @@ format_gb() {
 
 prepare_lvm_disk() {
     local dev=$1
+    local req_size=$2
     local free_start free_end free_size free_type
     local new_part part_num part_count total_size_mb
 
@@ -182,7 +183,7 @@ prepare_lvm_disk() {
             return 1
         }
 
-        msg_info "Ổ $dev hoàn toàn trống: sử dụng toàn bộ $(format_gb "$total_size_mb") cho LVM." >&2
+        msg_info "Ổ $dev hoàn toàn trống: Chuẩn bị xử lý phân vùng LVM..." >&2
 
         if ! parted -s "$dev" print >/dev/null 2>&1; then
             parted -s "$dev" mklabel gpt || {
@@ -227,6 +228,32 @@ prepare_lvm_disk() {
         }
     fi
 
+    # --- LOGIC XỬ LÝ DUNG LƯỢNG YÊU CẦU ---
+    local start_val=${free_start%MiB}
+    local end_val=${free_end%MiB}
+    local available_mb=$(( end_val - start_val ))
+
+    if [ -n "$req_size" ]; then
+        local req_val=$(echo "$req_size" | sed -E 's/[^0-9]+//g')
+        local req_unit=$(echo "$req_size" | tr -d '0-9. ' | tr 'a-z' 'A-Z')
+        local req_mib=0
+        
+        if [[ "$req_unit" == *"G"* ]]; then
+            req_mib=$(( req_val * 1024 ))
+        elif [[ "$req_unit" == *"M"* || -z "$req_unit" ]]; then
+            req_mib=$req_val
+        fi
+        
+        if [ "$req_mib" -gt 0 ]; then
+            if [ "$req_mib" -gt "$available_mb" ]; then
+                msg_warn "Yêu cầu ($req_mib MiB) lớn hơn mức trống ($available_mb MiB) trên $dev. Sẽ tự động dùng toàn bộ mức trống." >&2
+            else
+                free_end=$(( start_val + req_mib ))MiB
+                msg_info "Chỉ cắt $(format_gb "$req_mib") ($req_mib MiB) từ $dev để nạp vào VG." >&2
+            fi
+        fi
+    fi
+
     msg_ok "Vùng LVM khả dụng trên $dev: ${free_start} -> ${free_end}" >&2
 
     part_num=$(lsblk -nr -o NAME "$dev" 2>/dev/null | grep -c "$(basename "$dev")[0-9]")
@@ -244,7 +271,6 @@ prepare_lvm_disk() {
     udevadm settle 2>/dev/null
     sleep 1
 
-    # Tương thích CentOS 7 lsblk
     new_part=$(lsblk -nr -o NAME "$dev" 2>/dev/null | grep -E "^$(basename $dev)[0-9]+$" | tail -1 | awk '{print "/dev/" $1}')
 
     [ -b "$new_part" ] || {
@@ -283,9 +309,15 @@ setup_lvm() {
         read -r -p "Nhập tên các ổ gốc để gộp (vd: sdb sdc) hoặc Enter để hủy: " -a disks
         [ ${#disks[@]} -eq 0 ] && { msg_warn "Đã hủy thao tác."; return 1; }
 
+        local pv_sizes=()
+        for d in "${disks[@]}"; do
+            read -r -p "  -> Dung lượng cắt từ ổ $d (vd: 5G, 500M) - Enter để nạp TOÀN BỘ: " p_size
+            pv_sizes+=("$p_size")
+        done
+
         read -r -p "Tên VG [VolumeA]: " vg; vg="${vg:-VolumeA}"
         read -r -p "Tên LV [LV]: " lv; lv="${lv:-LV}"
-        read -r -p "Nhập dung lượng LV (vd: 10G, 500M) hoặc Enter để dùng TOÀN BỘ: " lv_size
+        read -r -p "Nhập dung lượng LV (vd: 10G, 500M) hoặc Enter để dùng TOÀN BỘ pool: " lv_size
 
         echo "1. ext4 | 2. xfs | 3. ext3"
         read -r -p "Định dạng cho LVM [1-3] hoặc phím khác để hủy: " fs_choice
@@ -296,10 +328,10 @@ setup_lvm() {
         local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
 
         # --- BƯỚC 2: THỰC THI ---
-        msg_info "Đang chuẩn bị phân vùng trên ổ đĩa..."
+        msg_info "Đang chuẩn bị phân vùng trên các ổ đĩa..."
         local lvm_parts=()
-        for d in "${disks[@]}"; do
-            local p=$(prepare_lvm_disk "/dev/${d#/dev/}")
+        for i in "${!disks[@]}"; do
+            local p=$(prepare_lvm_disk "/dev/${disks[$i]#/dev/}" "${pv_sizes[$i]}")
             [ -n "$p" ] && lvm_parts+=("$p")
         done
         [ ${#lvm_parts[@]} -eq 0 ] && { msg_err "Không tạo được phân vùng. Hủy thao tác."; return 1; }
@@ -311,13 +343,12 @@ setup_lvm() {
             pvcreate "${lvm_parts[@]}" && vgcreate "$vg" "${lvm_parts[@]}" && lvcreate -L "$lv_size" -n "$lv" "$vg" || { msg_err "Lỗi tạo LVM"; return 1; }
         fi
 
-        format_and_mount "/dev/$vg/$lv" "${fs_cfg[0]}" "${fs_cfg[1]}" "/root/Desktop/DiskLVM_${vg}_${lv}"
+        format_and_mount "/dev/$vg/$lv" "${fs_cfg[0]}" "${fs_cfg[1]}" "/mnt/DiskLVM_${vg}_${lv}"
 
     elif [ "$mode" == "2" ]; then
         msg_info "MỞ RỘNG LVM AN TOÀN"
         vgs &>/dev/null || { msg_err "Không tìm thấy Volume Group nào. Quay lại Menu."; return 1; }
         
-        # HIỂN THỊ VG ĐÃ ĐƯỢC LỌC CỘT TRÁNH NHẦM LẪN
         msg_info "Danh sách các Volume Group (VG) hiện có:"
         vgs --noheadings -o vg_name,vg_size,vg_free 2>/dev/null | awk '{print "  - Tên VG: " $1 " | Tổng: " $2 " | Chưa dùng: " $3}'
         
@@ -326,7 +357,6 @@ setup_lvm() {
         [ -z "$t_vg" ] && { msg_warn "Đã hủy thao tác."; return 1; }
         vgs "$t_vg" &>/dev/null || { msg_err "VG '$t_vg' không tồn tại. Đã hủy."; return 1; }
 
-        # HIỂN THỊ LV ĐÃ ĐƯỢC LỌC CỘT (Chỉ giữ lại Tên LV và Dung lượng)
         msg_info "Danh sách các Phân vùng ảo (LV) nằm trong VG '$t_vg':"
         lvs --noheadings -o lv_name,lv_size "$t_vg" 2>/dev/null | awk '{print "  - Tên LV: " $1 " | Dung lượng hiện tại: " $2}'
         
@@ -338,13 +368,23 @@ setup_lvm() {
         read -r -p "Nhập các ổ đĩa MỚI muốn thêm vào LVM (vd: sdc sdd): " -a disks
         [ ${#disks[@]} -eq 0 ] && { msg_warn "Đã hủy thao tác."; return 1; }
 
-        read -r -p "Dung lượng muốn CỘNG THÊM (vd: +10G, +500M) hoặc Enter để dùng TOÀN BỘ: " extend_size
+        local pv_sizes=()
+        for d in "${disks[@]}"; do
+            read -r -p "  -> Dung lượng cắt từ ổ $d (vd: 5G, 500M) - Enter để nạp TOÀN BỘ: " p_size
+            pv_sizes+=("$p_size")
+        done
+
+        read -r -p "Dung lượng muốn CỘNG THÊM vào LV (vd: +10G, 500M) - Enter để dùng TOÀN BỘ pool: " extend_size
+        
+        if [[ -n "$extend_size" ]]; then
+            extend_size="+${extend_size#+}"
+        fi
 
         # --- BƯỚC 2: THỰC THI ---
-        msg_info "Đang chuẩn bị phân vùng trên ổ đĩa mới..."
+        msg_info "Đang chuẩn bị phân vùng trên các ổ đĩa mới..."
         local new_parts=()
-        for d in "${disks[@]}"; do
-            local p=$(prepare_lvm_disk "/dev/${d#/dev/}")
+        for i in "${!disks[@]}"; do
+            local p=$(prepare_lvm_disk "/dev/${disks[$i]#/dev/}" "${pv_sizes[$i]}")
             [ -n "$p" ] && new_parts+=("$p")
         done
         [ ${#new_parts[@]} -eq 0 ] && { msg_err "Không có ổ đĩa hợp lệ. Đã hủy."; return 1; }
