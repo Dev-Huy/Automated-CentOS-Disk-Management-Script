@@ -49,9 +49,6 @@ format_and_mount() {
 }
 
 chon_o_dia() {
-    # Hàm này được gọi bằng command substitution: disk=$(chon_o_dia)
-    # Vì vậy stdout chỉ được phép chứa device cuối cùng (/dev/sdX).
-    # Toàn bộ nội dung giao diện được đưa sang stderr để hiển thị ngay.
     msg_info "DANH SÁCH Ổ ĐĨA KHẢ DỤNG (Đã ẩn đĩa OS, đĩa đầy hoặc max 4 phân vùng)" >&2
     local disks=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk" && $1!="sr0" && !/loop/ {print $1}')
     local has_disk=0
@@ -81,26 +78,36 @@ chon_o_dia() {
         return 1
     fi
 
-    # Chỉ stdout: giá trị trả về cho command substitution ở caller.
     echo "$target"
 }
 
 chay_chuc_nang_partition() {
     local disk=$(chon_o_dia)
-    [ -z "$disk" ] && return 1
+    [ -z "$disk" ] && { msg_warn "Đã hủy. Quay lại Menu chính."; return 1; }
 
-    msg_info "CHẾ ĐỘ AN TOÀN: Giữ nguyên dữ liệu cũ, chỉ tạo thêm phân vùng trên không gian trống."
+    # --- BƯỚC 1: NHẬP LIỆU VÀ KIỂM TRA ---
+    msg_info "CHẾ ĐỘ AN TOÀN: Giữ nguyên dữ liệu cũ, tạo thêm phân vùng trên không gian trống."
     read -r -p "Tiếp tục? (y/N): " ok
-    [[ "$ok" != [yY]* ]] && return 0
+    [[ "$ok" != [yY]* ]] && { msg_warn "Đã hủy thao tác."; return 1; }
 
     read -r -p "Nhập dung lượng (vd: +10G) hoặc Enter để dùng toàn bộ: " part_size
+    
     echo "1. ext4 (Khuyến nghị) | 2. xfs | 3. ext3"
-    read -r -p "Chọn định dạng [1-3]: " fs_choice
+    read -r -p "Chọn định dạng [1-3] hoặc phím khác để hủy: " fs_choice
+    if [[ ! "$fs_choice" =~ ^[1-3]$ ]]; then
+        msg_warn "Định dạng không hợp lệ. Đã hủy thao tác."
+        return 1
+    fi
 
+    read -r -p "Bạn có muốn ép buộc định dạng (Force Format)? (y/N): " force_cfm
+    local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
+    local force_flag=""
+    [[ "$force_cfm" == [yY]* ]] && force_flag="${fs_cfg[1]}"
+
+    # --- BƯỚC 2: THỰC THI ---
     local old_parts=$(lsblk -nr -o NAME "$disk")
     msg_info "Đang phân vùng mới trên $disk..."
     
-    # Bỏ lệnh 'o', dùng 'n' để giữ nguyên Partition Table hiện tại
     if [ -z "$part_size" ]; then
         printf "n\np\n\n\n\nw\n" | fdisk "$disk" >/dev/null 2>&1
     else
@@ -108,21 +115,15 @@ chay_chuc_nang_partition() {
     fi
     partprobe "$disk" 2>/dev/null; sleep 2
 
-    # Tìm phân vùng vừa mới sinh ra
+    # Tìm phân vùng mới tạo (Tương thích CentOS 7)
     local new_part=""
     for p in $(lsblk -nr -o NAME "$disk"); do
         ! echo "$old_parts" | grep -q "^$p$" && new_part="/dev/$p" && break
     done
 
-    [ -z "$new_part" ] && { msg_err "Lỗi tạo phân vùng (hết dung lượng trống)."; return 1; }
+    [ -z "$new_part" ] && { msg_err "Lỗi tạo phân vùng. Hết dung lượng trống."; return 1; }
     msg_ok "Đã tạo thành công: $new_part"
 
-    read -r -p "Bạn có muốn ép buộc định dạng (Force Format - xóa sạch tàn dư hệ tập tin cũ)? (y/N): " force_cfm
-    local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
-    local force_flag=""
-    [[ "$force_cfm" == [yY]* ]] && force_flag="${fs_cfg[1]}"
-
-    # Mount động theo tên phân vùng
     format_and_mount "$new_part" "${fs_cfg[0]}" "$force_flag" "/root/Desktop/DiskLocal_$(basename "$new_part")"
 }
 
@@ -136,8 +137,6 @@ get_lvm_free_mb() {
     command -v parted >/dev/null 2>&1 || return 1
     [ -b "$dev" ] || return 1
 
-    # Nếu ổ hoàn toàn chưa có partition nào, toàn bộ dung lượng ổ là
-    # UNALLOCATED và có thể dùng để tạo PV/partition LVM.
     part_count=$(lsblk -nr -o TYPE "$dev" 2>/dev/null | grep -c '^part$')
     if [ "$part_count" -eq 0 ]; then
         total_bytes=$(lsblk -dn -b -o SIZE "$dev" 2>/dev/null)
@@ -146,7 +145,6 @@ get_lvm_free_mb() {
         return 0
     fi
 
-    # Với ổ đã có partition, chỉ tính phần UNALLOCATED/Free Space thật sự.
     parted -m -s "$dev" unit MiB print free 2>/dev/null |
         awk -F: '
             $5 ~ /Free Space/ {
@@ -175,13 +173,8 @@ prepare_lvm_disk() {
         return 1
     }
 
-    # Kiểm tra số partition hiện có.
     part_count=$(lsblk -nr -o TYPE "$dev" 2>/dev/null | grep -c '^part$')
 
-    # ------------------------------------------------------------------
-    # TRƯỜNG HỢP 1: Ổ hoàn toàn trống, chưa có partition table.
-    # Toàn bộ ổ được xem là vùng khả dụng.
-    # ------------------------------------------------------------------
     if [ "$part_count" -eq 0 ]; then
         total_size_mb=$(get_lvm_free_mb "$dev")
         [ -n "$total_size_mb" ] && [ "$total_size_mb" -ge 10 ] || {
@@ -191,8 +184,6 @@ prepare_lvm_disk() {
 
         msg_info "Ổ $dev hoàn toàn trống: sử dụng toàn bộ $(format_gb "$total_size_mb") cho LVM." >&2
 
-        # Nếu chưa có disk label, tạo GPT. Đây chỉ là partition table,
-        # không xóa dữ liệu vì ổ đang không có partition.
         if ! parted -s "$dev" print >/dev/null 2>&1; then
             parted -s "$dev" mklabel gpt || {
                 msg_err "Không thể tạo GPT partition table trên $dev." >&2
@@ -203,9 +194,6 @@ prepare_lvm_disk() {
         free_start="1MiB"
         free_end="$((total_size_mb - 1))MiB"
     else
-        # ------------------------------------------------------------------
-        # TRƯỜNG HỢP 2: Ổ đã có partition -> chỉ lấy vùng Free Space.
-        # ------------------------------------------------------------------
         msg_info "Đang quét vùng UNALLOCATED trên $dev..." >&2
 
         while IFS='|' read -r free_start free_end free_size free_type; do
@@ -241,8 +229,7 @@ prepare_lvm_disk() {
 
     msg_ok "Vùng LVM khả dụng trên $dev: ${free_start} -> ${free_end}" >&2
 
-    # Lấy số partition lớn nhất hiện có rồi +1.
-    part_num=$(lsblk -nr -o PARTN "$dev" 2>/dev/null | sort -n | tail -1)
+    part_num=$(lsblk -nr -o NAME "$dev" 2>/dev/null | grep -c "$(basename "$dev")[0-9]")
     part_num=$(( ${part_num:-0} + 1 ))
 
     msg_info "Tạo partition LVM trong vùng ${free_start} -> ${free_end}..." >&2
@@ -252,13 +239,12 @@ prepare_lvm_disk() {
         return 1
     }
 
-    # Đánh dấu partition là LVM.
     parted -s "$dev" set "$part_num" lvm on 2>/dev/null || true
-
     partprobe "$dev" 2>/dev/null
     udevadm settle 2>/dev/null
     sleep 1
 
+    # Đã sửa lỗi lsblk tương thích CentOS 7
     new_part=$(lsblk -nr -o NAME "$dev" 2>/dev/null | grep -E "^$(basename $dev)[0-9]+$" | tail -1 | awk '{print "/dev/" $1}')
 
     [ -b "$new_part" ] || {
@@ -267,8 +253,6 @@ prepare_lvm_disk() {
     }
 
     msg_ok "Đã tạo partition LVM an toàn: $new_part" >&2
-
-    # CHỈ stdout ra device để command substitution nhận đúng giá trị.
     echo "$new_part"
 }
 
@@ -285,67 +269,84 @@ setup_lvm() {
         for d in $disks_avail; do
             local dev="/dev/$d"
             is_os_disk "$dev" && continue
-
-            local total_size free_mb
-            total_size=$(lsblk -dn -o SIZE "$dev")
-            free_mb=$(get_lvm_free_mb "$dev")
+            local free_mb=$(get_lvm_free_mb "$dev")
             free_mb=${free_mb:-0}
-
-            # Chỉ đưa vào danh sách nếu thực sự có vùng UNALLOCATED.
             if [ "$free_mb" -ge 10 ]; then
                 has_lvm_disk=1
-                echo "  - $d | Tổng: $total_size | Trống khả dụng cho LVM: $(format_gb "$free_mb") (${free_mb} MiB)"
+                echo "  - $d | Trống khả dụng cho LVM: $(format_gb "$free_mb") (${free_mb} MiB)"
             fi
         done
 
-        [ "$has_lvm_disk" -eq 0 ] && {
-            msg_warn "Không có ổ đĩa nào còn vùng UNALLOCATED khả dụng cho LVM."
-            return 1
-        }
+        [ "$has_lvm_disk" -eq 0 ] && { msg_warn "Không có ổ đĩa khả dụng. Quay lại Menu."; return 1; }
         
-        read -r -p "Nhập tên các ổ gốc để gộp (vd: sdb sdc): " -a disks
-        [ ${#disks[@]} -eq 0 ] && return 1
+        # --- BƯỚC 1: NHẬP LIỆU VÀ KIỂM TRA ---
+        read -r -p "Nhập tên các ổ gốc để gộp (vd: sdb sdc) hoặc Enter để hủy: " -a disks
+        [ ${#disks[@]} -eq 0 ] && { msg_warn "Đã hủy thao tác."; return 1; }
 
+        read -r -p "Tên VG [VolumeA]: " vg; vg="${vg:-VolumeA}"
+        read -r -p "Tên LV [LV]: " lv; lv="${lv:-LV}"
+        read -r -p "Nhập dung lượng LV (vd: 10G, 500M) hoặc Enter để dùng TOÀN BỘ: " lv_size
+
+        echo "1. ext4 | 2. xfs | 3. ext3"
+        read -r -p "Định dạng cho LVM [1-3] hoặc phím khác để hủy: " fs_choice
+        if [[ ! "$fs_choice" =~ ^[1-3]$ ]]; then
+            msg_warn "Lựa chọn định dạng không hợp lệ. Đã hủy toàn bộ thao tác."
+            return 1
+        fi
+        local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
+
+        # --- BƯỚC 2: THỰC THI ---
+        msg_info "Đang chuẩn bị phân vùng trên ổ đĩa..."
         local lvm_parts=()
         for d in "${disks[@]}"; do
             local p=$(prepare_lvm_disk "/dev/${d#/dev/}")
             [ -n "$p" ] && lvm_parts+=("$p")
         done
-
-        [ ${#lvm_parts[@]} -eq 0 ] && { msg_err "Không có phân vùng hợp lệ."; return 1; }
-
-        read -r -p "Tên VG [VolumeA]: " vg; vg="${vg:-VolumeA}"
-        read -r -p "Tên LV [LV]: " lv; lv="${lv:-LV}"
+        [ ${#lvm_parts[@]} -eq 0 ] && { msg_err "Không tạo được phân vùng. Hủy thao tác."; return 1; }
 
         msg_info "Đang khởi tạo cấu trúc LVM..."
-        pvcreate "${lvm_parts[@]}" && vgcreate "$vg" "${lvm_parts[@]}" && lvcreate -l 100%FREE -n "$lv" "$vg" || return 1
-
-        echo "1. ext4 | 2. xfs | 3. ext3"
-        read -r -p "Định dạng cho LVM [1-3]: " fs_choice
-        local fs_cfg=($(get_fs_and_force_flag "$fs_choice"))
+        if [ -z "$lv_size" ]; then
+            pvcreate "${lvm_parts[@]}" && vgcreate "$vg" "${lvm_parts[@]}" && lvcreate -l 100%FREE -n "$lv" "$vg" || { msg_err "Lỗi tạo LVM"; return 1; }
+        else
+            pvcreate "${lvm_parts[@]}" && vgcreate "$vg" "${lvm_parts[@]}" && lvcreate -L "$lv_size" -n "$lv" "$vg" || { msg_err "Lỗi tạo LVM"; return 1; }
+        fi
 
         format_and_mount "/dev/$vg/$lv" "${fs_cfg[0]}" "${fs_cfg[1]}" "/root/Desktop/DiskLVM_${vg}_${lv}"
 
     elif [ "$mode" == "2" ]; then
         msg_info "MỞ RỘNG LVM AN TOÀN"
-        vgs 2>/dev/null || { msg_err "Không tìm thấy Volume Group nào."; return 1; }
+        vgs 2>/dev/null || { msg_err "Không tìm thấy VG nào. Quay lại Menu."; return 1; }
         
-        read -r -p "Nhập tên VG muốn mở rộng: " t_vg
-        lvs "$t_vg" 2>/dev/null && read -r -p "Nhập tên LV muốn mở rộng: " t_lv
+        # --- BƯỚC 1: NHẬP LIỆU VÀ KIỂM TRA ---
+        read -r -p "Nhập tên VG muốn mở rộng (hoặc Enter để hủy): " t_vg
+        [ -z "$t_vg" ] && { msg_warn "Đã hủy thao tác."; return 1; }
+        vgs "$t_vg" &>/dev/null || { msg_err "VG '$t_vg' không tồn tại. Đã hủy."; return 1; }
+
+        read -r -p "Nhập tên LV muốn mở rộng: " t_lv
+        [ -z "$t_lv" ] && { msg_warn "Đã hủy thao tác."; return 1; }
         local lv_path="/dev/$t_vg/$t_lv"
-        [ ! -b "$lv_path" ] && { msg_err "LV $lv_path không tồn tại."; return 1; }
+        [ ! -b "$lv_path" ] && { msg_err "LV '$lv_path' không tồn tại. Đã hủy."; return 1; }
 
         read -r -p "Nhập các ổ đĩa MỚI muốn thêm vào LVM (vd: sdc sdd): " -a disks
+        [ ${#disks[@]} -eq 0 ] && { msg_warn "Đã hủy thao tác."; return 1; }
+
+        read -r -p "Dung lượng muốn CỘNG THÊM (vd: +10G, +500M) hoặc Enter để dùng TOÀN BỘ: " extend_size
+
+        # --- BƯỚC 2: THỰC THI ---
+        msg_info "Đang chuẩn bị phân vùng trên ổ đĩa mới..."
         local new_parts=()
         for d in "${disks[@]}"; do
             local p=$(prepare_lvm_disk "/dev/${d#/dev/}")
             [ -n "$p" ] && new_parts+=("$p")
         done
-
-        [ ${#new_parts[@]} -eq 0 ] && return 1
+        [ ${#new_parts[@]} -eq 0 ] && { msg_err "Không có ổ đĩa hợp lệ. Đã hủy."; return 1; }
 
         msg_info "Đang bổ sung dung lượng..."
-        pvcreate "${new_parts[@]}" && vgextend "$t_vg" "${new_parts[@]}" && lvextend -l +100%FREE "$lv_path" || return 1
+        if [ -z "$extend_size" ]; then
+            pvcreate "${new_parts[@]}" && vgextend "$t_vg" "${new_parts[@]}" && lvextend -l +100%FREE "$lv_path" || { msg_err "Lỗi mở rộng."; return 1; }
+        else
+            pvcreate "${new_parts[@]}" && vgextend "$t_vg" "${new_parts[@]}" && lvextend -L "$extend_size" "$lv_path" || { msg_err "Lỗi mở rộng."; return 1; }
+        fi
 
         msg_info "Đang ép giãn hệ tập tin (Resize FS)..."
         local cur_fs=$(blkid -s TYPE -o value "$lv_path")
@@ -361,6 +362,9 @@ setup_lvm() {
             resize2fs "$lv_path"
         fi
         msg_ok "Mở rộng thành công: $lv_path"
+    else
+        msg_warn "Lựa chọn không hợp lệ. Đã hủy và quay lại Menu chính."
+        return 1
     fi
 }
 
