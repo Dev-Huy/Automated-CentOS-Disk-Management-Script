@@ -320,9 +320,12 @@ setup_lvm() {
         # --- BƯỚC 1: NHẬP LIỆU VÀ KIỂM TRA ---
         read -r -p "Nhập tên VG muốn mở rộng (hoặc Enter để hủy): " t_vg
         [ -z "$t_vg" ] && { msg_warn "Đã hủy thao tác."; return 1; }
-        vgs "$t_vg" &>/dev/null || { msg_err "VG '$t_vg' không tồn tại. Đã hủy."; return 1; }
+       vgs "$t_vg" &>/dev/null || { msg_err "VG '$t_vg' không tồn tại. Đã hủy."; return 1; }
 
-        read -r -p "Nhập tên LV muốn mở rộng: " t_lv
+        msg_info "Danh sách các LV hiện có trong VG '$t_vg':"
+        lvs "$t_vg" 2>/dev/null
+        
+        read -r -p "Nhập chính xác tên LV muốn mở rộng (Xem ở cột LV): " t_lv
         [ -z "$t_lv" ] && { msg_warn "Đã hủy thao tác."; return 1; }
         local lv_path="/dev/$t_vg/$t_lv"
         [ ! -b "$lv_path" ] && { msg_err "LV '$lv_path' không tồn tại. Đã hủy."; return 1; }
